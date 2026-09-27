@@ -3106,6 +3106,11 @@ impl ShojiWM {
     pub fn register_libinput_device(&mut self, mut device: input::Device) {
         let key = libinput_device_key(&mut device);
         let snapshot = snapshot_for_libinput_device(&mut device);
+        if snapshot.kind.keyboard
+            && let Some(keyboard) = self.seat.get_keyboard()
+        {
+            device.led_update(keyboard.led_state().into());
+        }
         self.runtime_input_devices.insert(key.clone(), snapshot);
         self.runtime_libinput_devices.insert(key, device);
         self.decoration_evaluator

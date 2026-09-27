@@ -8,6 +8,7 @@ mod xwayland;
 //
 
 use smithay::input::dnd::{DnDGrab, DndGrabHandler, GrabType, Source};
+use smithay::input::keyboard::LedState;
 use smithay::input::pointer::{Focus, PointerHandle};
 use smithay::input::{Seat, SeatHandler, SeatState};
 use smithay::output::Output;
@@ -70,6 +71,14 @@ impl SeatHandler for ShojiWM {
 
     fn seat_state(&mut self) -> &mut SeatState<ShojiWM> {
         &mut self.seat_state
+    }
+
+    fn led_state_changed(&mut self, _seat: &Seat<Self>, led_state: LedState) {
+        for device in self.runtime_libinput_devices.values_mut() {
+            if device.has_capability(input::DeviceCapability::Keyboard) {
+                device.led_update(led_state.into());
+            }
+        }
     }
 
     fn cursor_image(

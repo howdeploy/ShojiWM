@@ -104,6 +104,12 @@ Options:
 `windowSource`, `layerSource`, and `popupSource` accept
 `{include: 'full' | 'root-surface'}`. The default is `'full'`.
 
+On the TTY backend, a full window source includes the root surface,
+subsurfaces, and server-side decorations. A full-source replacement applies
+to that entire image; subsurfaces are not drawn a second time above it.
+Popups remain independently composed. A root-surface source continues to
+exclude subsurfaces.
+
 ### Stages
 
 | Stage | Purpose |

@@ -5490,20 +5490,6 @@ fn render_surface(
                     );
                     current_window_elements.extend(popup_elements);
                 }
-                if use_full_window_snapshot {
-                    current_window_elements.extend(non_root_surface_elements_for_window(
-                        window,
-                        &mut backend.renderer,
-                        physical_location,
-                        client_physical_geometry,
-                        output_geo.loc,
-                        scale,
-                        scale,
-                        visual_state,
-                        visual_state.opacity,
-                        content_clip,
-                    ));
-                }
                 window_timing.popup_phase_ms =
                     popup_phase_started_at.elapsed().as_secs_f64() * 1000.0;
                 if output_render_debug_enabled() {
@@ -5533,8 +5519,8 @@ fn render_surface(
                         "output_render_debug: window rendered"
                     );
                 }
-                // Window-source effects sample only the top-level window. `Full` means
-                // root surface plus SSD decoration, but not popup/subsurface content.
+                // Full window sources include subsurfaces and SSD decorations.
+                // Popups remain independently composed above the window effect.
                 let source_clip_scale = if use_full_window_snapshot {
                     scale
                 } else {
@@ -5573,7 +5559,7 @@ fn render_surface(
                     })
                     .unwrap_or_default();
                 let root_surface_source_elements = if needs_root_surface_source {
-                    root_surface_source_elements_for_window(
+                    window_surface_source_elements_for_window(
                         window,
                         &mut backend.renderer,
                         physical_location,
@@ -5584,12 +5570,13 @@ fn render_surface(
                         visual_state,
                         visual_state.opacity,
                         content_clip,
+                        false,
                     )
                 } else {
                     Vec::new()
                 };
                 let mut full_window_source_elements = if needs_full_window_source {
-                    root_surface_source_elements_for_window(
+                    window_surface_source_elements_for_window(
                         window,
                         &mut backend.renderer,
                         physical_location,
@@ -5600,6 +5587,7 @@ fn render_surface(
                         visual_state,
                         visual_state.opacity,
                         content_clip,
+                        true,
                     )
                 } else {
                     Vec::new()
@@ -5826,7 +5814,12 @@ fn render_surface(
                     .ok()
             });
                 if let Some(replace_effects) = replace_effects {
-                    if !use_full_window_snapshot {
+                    // Full replacement owns subsurfaces too (e.g. OBS's video preview).
+                    // Drawing them again here bypasses the shader's visibility mask.
+                    if !matches!(
+                        replace_effect_slot.as_ref().map(|effect| &effect.effect.input),
+                        Some(EffectInput::WindowSource(WindowSourceInclude::Full))
+                    ) {
                         current_window_elements.extend(non_root_surface_elements_for_window(
                             window,
                             &mut backend.renderer,
@@ -5842,6 +5835,20 @@ fn render_surface(
                     }
                     current_window_elements.extend(replace_effects);
                 } else {
+                    if use_full_window_snapshot {
+                        current_window_elements.extend(non_root_surface_elements_for_window(
+                            window,
+                            &mut backend.renderer,
+                            physical_location,
+                            client_physical_geometry,
+                            output_geo.loc,
+                            scale,
+                            scale,
+                            visual_state,
+                            visual_state.opacity,
+                            content_clip,
+                        ));
+                    }
                     current_window_elements.extend(original_window_body_elements);
                 }
                 if window_effect_debug_enabled() {
@@ -7527,7 +7534,7 @@ fn transform_clipped_elements(
         .collect()
 }
 
-fn root_surface_source_elements_for_window(
+fn window_surface_source_elements_for_window(
     window: &smithay::desktop::Window,
     renderer: &mut GlesRenderer,
     physical_location: Point<i32, smithay::utils::Physical>,
@@ -7538,6 +7545,7 @@ fn root_surface_source_elements_for_window(
     visual: WindowVisualState,
     alpha: f32,
     content_clip: Option<crate::ssd::ContentClip>,
+    include_subsurfaces: bool,
 ) -> Vec<TtyRenderElements> {
     if let Some(content_clip) = content_clip.filter(|clip| clip.clips_surface) {
         let clipped = window_render::clipped_surface_elements(
@@ -7555,10 +7563,27 @@ fn root_surface_source_elements_for_window(
         .inspect_err(|error| {
             warn!(
                 ?error,
-                "failed to build clipped root surface source elements"
+                "failed to build clipped window surface source elements"
             );
         })
         .unwrap_or_default();
+
+        if include_subsurfaces {
+            return clipped
+                .into_iter()
+                .flat_map(|element| match element {
+                    window_render::WindowClipElement::Clipped(element) => {
+                        transform_clipped_elements(vec![element], visual)
+                    }
+                    window_render::WindowClipElement::Raw(element) => transform_window_elements(
+                        vec![element],
+                        visual,
+                        TtyRenderElements::Window,
+                        TtyRenderElements::TransformedWindow,
+                    ),
+                })
+                .collect();
+        }
 
         let mut root_raw_element = None;
         for element in clipped {
@@ -7583,13 +7608,13 @@ fn root_surface_source_elements_for_window(
     }
 
     transform_window_elements(
-        window_render::root_surface_elements(
-            window,
-            renderer,
-            physical_location,
-            output_scale,
-            alpha,
-        ),
+        if include_subsurfaces {
+            window_render::surface_elements(window, renderer, physical_location, output_scale, alpha)
+        } else {
+            window_render::root_surface_elements(
+                window, renderer, physical_location, output_scale, alpha,
+            )
+        },
         visual,
         TtyRenderElements::Window,
         TtyRenderElements::TransformedWindow,

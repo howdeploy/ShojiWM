@@ -397,6 +397,7 @@ pub struct ShojiWM {
     pub runtime_gesture_swipe_async_enabled: bool,
     pub runtime_gesture_swipe: Option<RuntimeGestureSwipeState>,
     pub current_keyboard_modifiers: ModifiersState,
+    pub published_keyboard_layout: Option<crate::keyboard_layout::KeyboardLayoutStatus>,
     // Modifier-only tap detection (e.g. "Super"). If no other input occurs
     // between press and release, the release is treated as a tap.
     pub tap_pressed_keys: u32,
@@ -1719,6 +1720,7 @@ impl ShojiWM {
             runtime_gesture_swipe_async_enabled: false,
             runtime_gesture_swipe: None,
             current_keyboard_modifiers: ModifiersState::default(),
+            published_keyboard_layout: None,
             tap_pressed_keys: 0,
             tap_armed_modifier: None,
             tap_interrupted: false,
@@ -2221,6 +2223,7 @@ impl ShojiWM {
     /// need to pull the resulting dirty actions through before the next idle
     /// poll would naturally fire (~250 ms later).
     fn tick_runtime_scheduler_with(&mut self, force: bool) -> u64 {
+        self.sync_keyboard_layout();
         self.refresh_runtime_processes();
         let managed_window_animation_active = !self.managed_window_animations.is_empty();
         if !force

@@ -63,6 +63,26 @@ input.global = {
 };
 ```
 
+## Reading the active keyboard layout
+
+The compositor publishes the seat's actual XKB layout to
+`$XDG_RUNTIME_DIR/shojiwm-$WAYLAND_DISPLAY-keyboard.json` for external panels:
+
+```json
+{"pid": 1234, "index": 0, "name": "English (US)"}
+```
+
+`index` is the zero-based XKB layout index and `name` is its XKB display name.
+The file contains no key events or typed text. It is written on the first
+scheduler tick and whenever the layout changes, with owner-only permissions
+and an atomic replacement. Watch the parent directory for replacements,
+rather than holding the original file open. No file is published without
+`XDG_RUNTIME_DIR`.
+
+The file may remain after the compositor exits; readers should stop showing
+it when the Wayland session disconnects. `pid` identifies the publisher.
+A failed write is logged once and retried on the next layout change.
+
 ## Pointer (mouse) settings
 
 `pointer` — an `InputDeviceConfig.pointer` object.

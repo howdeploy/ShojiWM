@@ -18,6 +18,13 @@ smithay-drm-extras = {
     package = "smithay-drm-extras",
     default-features = false
 }
+# xwayland-satellite, run in-process on its own thread (see
+# `xwayland_satellite.rs`). Renamed so the crate does not clash with that module.
+satellite = {
+    package = "xwayland-satellite",
+    git = "https://github.com/bea4dev/xwayland-satellite.git",
+    rev = "000dd9834a4964d2363bb197adbcf55092909030"
+}
 wayland-protocols = { version = "0.32.12", features = ["server", "staging"] }
 wayland-protocols-wlr = { version = "0.3.12", features = ["server"] }
 wayland-server = { version = "0.31.13", features = ["libwayland_1_23"] }

@@ -461,20 +461,23 @@ impl CompositorHandler for ShojiWM {
                                 attrs.lock().unwrap().hotspot -= buffer_delta;
                             }
 
-                        let mut viewport_cache = states.cached_state.get::<ViewportCachedState>();
-                        let viewport = viewport_cache.current();
-                        if viewport.src.is_some() || viewport.dst.is_some() {
+                        // A viewport means the client already sized the cursor itself;
+                        // xwayland-satellite does this for X cursors (buffer ÷ its scale,
+                        // hotspot already converted). Guessing a buffer_scale on top would
+                        // shrink the hotspot a second time.
+                        let has_viewport = {
+                            let mut viewport_cache =
+                                states.cached_state.get::<ViewportCachedState>();
+                            let viewport = viewport_cache.current();
+                            viewport.src.is_some() || viewport.dst.is_some()
+                        };
+                        if has_viewport {
                             return;
                         }
 
-                        // Workaround for Xwayland (via xwayland-satellite) sending oversized
-                        // cursor buffers without setting buffer_scale: it attaches a 48×48
-                        // Adwaita buffer and never calls set_buffer_scale(2), resulting in a
-                        // logical 48-px cursor that renders as 72 physical px on a 1.5×
-                        // output. xwayland-satellite does not viewport-correct cursor
-                        // surfaces (only toplevels), so we patch buffer_scale here on
-                        // commit. WaylandSurfaceRenderElement::geometry() then uses the
-                        // corrected view.dst at render time.
+                        // Keep the oversized-cursor workaround for older external Xwayland
+                        // bridges without viewport scaling. Native Wayland cursors and
+                        // viewport-corrected satellite cursors retain their own sizing.
                         let buffer_dims = match &states
                             .cached_state
                             .get::<SurfaceAttributes>()

@@ -23,11 +23,12 @@
           pkgs = pkgsFor system;
           libgbm = pkgs.libgbm or pkgs.mesa;
           xwayland = pkgs.xwayland or (pkgs.xorg.xwayland or null);
-          xwaylandSatellite = pkgs.xwayland-satellite or null;
         in
         rec {
+          # xwayland-satellite is built in; see nix/package.nix to run an
+          # external one instead.
           shojiwm = pkgs.callPackage ./nix/package.nix {
-            inherit libgbm xwayland xwaylandSatellite;
+            inherit libgbm xwayland;
           };
           default = shojiwm;
         }
@@ -56,7 +57,8 @@
           pkgs = pkgsFor system;
           libgbm = pkgs.libgbm or pkgs.mesa;
           xwayland = pkgs.xwayland or (pkgs.xorg.xwayland or null);
-          xwaylandSatellite = pkgs.xwayland-satellite or null;
+          libxcb = pkgs.libxcb or pkgs.xorg.libxcb;
+          xcbUtilCursor = pkgs.xcb-util-cursor or pkgs.xorg.xcbutilcursor;
           rustyV8Archive = pkgs.callPackage ./nix/rusty-v8.nix { };
           runtimeLibraryPath = lib.makeLibraryPath (
             with pkgs;
@@ -72,6 +74,8 @@
               seatd
               pipewire
               libdrm
+              libxcb
+              xcbUtilCursor
             ]
           );
           gbmBackendsPath = lib.makeSearchPath "lib/gbm" [
@@ -109,13 +113,10 @@
                 pipewire
                 libdrm
                 dbus
+                libxcb
+                xcbUtilCursor
               ]
-              ++ lib.optional (xwayland != null) xwayland
-              ++ lib.optional (xwaylandSatellite != null) xwaylandSatellite;
-
-            SHOJI_XWAYLAND_SATELLITE_PATH = lib.optionalString (
-              xwaylandSatellite != null
-            ) "${xwaylandSatellite}/bin/xwayland-satellite";
+              ++ lib.optional (xwayland != null) xwayland;
 
             LD_LIBRARY_PATH = runtimeLibraryPath;
             GBM_BACKENDS_PATH = gbmBackendsPath;

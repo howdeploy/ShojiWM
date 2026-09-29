@@ -119,7 +119,10 @@ use crate::ssd::{
     RuntimeEventConfigUpdate, WaylandOutputSnapshot, WaylandWindowSnapshot, WindowDecorationState,
     WindowPositionSnapshot,
 };
-use crate::xwayland_satellite::{SatelliteInstance, satellite_requested, spawn_satellite};
+use crate::xwayland_satellite::{
+    EmbeddedSatellite, SatelliteEvent, SatelliteInstance, SatelliteMode,
+    reserve_embedded_satellite, satellite_mode, spawn_external_satellite,
+};
 use crate::{
     backend::{
         async_assets::{AsyncAssetResult, spawn_async_asset_worker},
@@ -2017,22 +2020,157 @@ impl ShojiWM {
             .or_else(|| self.space.outputs().next().cloned())
     }
 
+    fn export_satellite_display(&mut self, instance: &SatelliteInstance) {
+        self.xdisplay = Some(instance.display_number);
+        // Before the embedded satellite thread starts, so its C `getenv` calls
+        // never overlap this write (see `process_env`).
+        crate::process_env::set_var("DISPLAY", &instance.display_name);
+        publish_activation_environment("xwayland-satellite-display");
+    }
+
+    /// Reserve the X11 display, export it, and start xwayland-satellite
+    /// in-process. Its thread reports back through a channel on the event
+    /// loop, which restarts it when Xwayland or satellite goes away.
+    fn start_embedded_satellite(
+        &mut self,
+        event_loop: &EventLoop<'static, ShojiWM>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (sender, receiver) = smithay::reexports::calloop::channel::channel();
+        let instance = reserve_embedded_satellite(sender)?;
+        event_loop
+            .handle()
+            .insert_source(receiver, |event, _, state| {
+                if let smithay::reexports::calloop::channel::Event::Msg(event) = event {
+                    state.handle_satellite_event(event);
+                }
+            })
+            .map_err(|error| error.error)?;
+        self.export_satellite_display(&instance);
+        self.xwayland_satellite = Some(instance);
+        self.run_embedded_satellite();
+        Ok(())
+    }
+
+    /// Start (or restart) the embedded satellite's thread and connect it.
+    fn run_embedded_satellite(&mut self) {
+        let Some(embedded) = self
+            .xwayland_satellite
+            .as_mut()
+            .and_then(|instance| instance.embedded.as_mut())
+        else {
+            return;
+        };
+        match embedded.start() {
+            Ok(stream) => self.insert_embedded_satellite_client(stream),
+            Err(error) => {
+                warn!(?error, "failed to start embedded xwayland-satellite thread");
+                self.schedule_satellite_restart();
+            }
+        }
+    }
+
+    /// Insert the compositor's end of the embedded satellite's connection as a
+    /// client. Peer credentials would name ShojiWM itself here, so the client
+    /// is marked as the Xwayland bridge directly.
+    fn insert_embedded_satellite_client(&mut self, stream: UnixStream) {
+        self.update_xwayland_refresh_override_from_pointer_or_first("xwayland-bridge-connect");
+        let identity = WaylandClientIdentity::embedded_satellite(&stream);
+        if let Err(error) = self.display_handle.insert_client(
+            stream,
+            Arc::new(ClientState {
+                compositor_state: CompositorClientState::default(),
+                xwayland_refresh_override: true,
+                identity,
+            }),
+        ) {
+            warn!(
+                ?error,
+                "failed to insert embedded xwayland-satellite client"
+            );
+        }
+    }
+
+    fn handle_satellite_event(&mut self, event: SatelliteEvent) {
+        let current = self
+            .xwayland_satellite
+            .as_ref()
+            .and_then(|instance| instance.embedded.as_ref())
+            .map(EmbeddedSatellite::generation);
+        match event {
+            SatelliteEvent::Ready {
+                generation,
+                display: display_name,
+                xwayland_pid,
+            } if Some(generation) == current => {
+                info!(
+                    display = %display_name,
+                    xwayland_pid,
+                    generation,
+                    "embedded xwayland-satellite ready"
+                );
+            }
+            SatelliteEvent::Exited {
+                generation,
+                panicked,
+            } if Some(generation) == current => {
+                if panicked {
+                    error!(generation, "embedded xwayland-satellite panicked");
+                } else {
+                    warn!(
+                        generation,
+                        "embedded xwayland-satellite exited (Xwayland stopped)"
+                    );
+                }
+                self.schedule_satellite_restart();
+            }
+            event => debug!(
+                ?event,
+                "ignoring event from a previous xwayland-satellite run"
+            ),
+        }
+    }
+
+    fn schedule_satellite_restart(&mut self) {
+        let Some(embedded) = self
+            .xwayland_satellite
+            .as_mut()
+            .and_then(|instance| instance.embedded.as_mut())
+        else {
+            return;
+        };
+        let delay = embedded.next_restart_delay();
+        info!(?delay, "restarting embedded xwayland-satellite");
+        if let Err(error) = self.loop_handle.insert_source(
+            smithay::reexports::calloop::timer::Timer::from_duration(delay),
+            |_, _, state| {
+                state.run_embedded_satellite();
+                smithay::reexports::calloop::timer::TimeoutAction::Drop
+            },
+        ) {
+            warn!(?error, "failed to schedule xwayland-satellite restart");
+        }
+    }
+
     pub fn start_xwayland(&mut self, event_loop: &EventLoop<'static, ShojiWM>) {
         // Seed from the pointer before spawning Xwayland. Otherwise Xwayland may bind outputs
         // immediately and cache a low-Hz fallback before the first X11 window exists.
         self.update_xwayland_refresh_override_from_pointer_or_first("xwayland-start");
 
-        if satellite_requested() {
-            match spawn_satellite() {
+        match satellite_mode() {
+            Some(SatelliteMode::Embedded) => match self.start_embedded_satellite(event_loop) {
+                Ok(()) => return,
+                Err(error) => warn!(
+                    ?error,
+                    "failed to start embedded xwayland-satellite, falling back to built-in XWayland"
+                ),
+            },
+            Some(SatelliteMode::External(path)) => match spawn_external_satellite(&path) {
                 Ok(instance) => {
-                    self.xdisplay = Some(instance.display_number);
-                    unsafe {
-                        std::env::set_var("DISPLAY", &instance.display_name);
-                    }
-                    publish_activation_environment("xwayland-satellite-display");
+                    self.export_satellite_display(&instance);
                     info!(
                         display = %instance.display_name,
-                        "xwayland-satellite started, DISPLAY exported"
+                        path = %path.display(),
+                        "external xwayland-satellite started, DISPLAY exported"
                     );
                     self.xwayland_satellite = Some(instance);
                     return;
@@ -2043,7 +2181,8 @@ impl ShojiWM {
                         "failed to start xwayland-satellite, falling back to built-in XWayland"
                     );
                 }
-            }
+            },
+            None => {}
         }
 
         use std::process::Stdio;
@@ -2070,9 +2209,7 @@ impl ShojiWM {
         // libX11 will retry connecting briefly until Xwayland accepts.
         let display_number = xwayland.display_number();
         self.xdisplay = Some(display_number);
-        unsafe {
-            std::env::set_var("DISPLAY", format!(":{}", display_number));
-        }
+        crate::process_env::set_var("DISPLAY", format!(":{}", display_number));
         publish_activation_environment("xwayland-display");
         info!(
             display = display_number,
@@ -4768,6 +4905,16 @@ struct WaylandClientIdentity {
 }
 
 impl WaylandClientIdentity {
+    /// The embedded xwayland-satellite, which shares ShojiWM's process.
+    fn embedded_satellite(fd: &UnixStream) -> Self {
+        Self {
+            pid: Some(std::process::id() as i32),
+            command: Some("xwayland-satellite (embedded)".to_owned()),
+            connected_at: Instant::now(),
+            socket_probe: fd.try_clone().ok(),
+        }
+    }
+
     fn from_socket(fd: &UnixStream) -> Self {
         let pid = socket_peercred(fd)
             .ok()

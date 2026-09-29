@@ -26,9 +26,9 @@ official release**. Until then, install from source as described below.
   - `libinput`
   - `libgbm`
   - `libseat`
-  - `xwayland` — the Xwayland server itself (driven by `xwayland-satellite` below)
-- [`xwayland-satellite`](https://github.com/Supreeeme/xwayland-satellite) — for
-  running X11 / Xwayland applications (see the note below)
+  - `libxcb` and `xcb-util-cursor` — used by the built-in xwayland-satellite
+  - `xwayland` — the Xwayland server itself, for X11 applications (see the note
+    below)
 - `sudo` — the installer copies files into `/usr` and registers the session
 
 :::note[Installing the native libraries]
@@ -37,40 +37,31 @@ Package names vary by distribution. For example:
 ```bash
 # Debian / Ubuntu
 sudo apt install libwayland-dev libxkbcommon-dev libudev-dev libinput-dev \
-  libgbm-dev libseat-dev xwayland
+  libgbm-dev libseat-dev libxcb1-dev libxcb-cursor-dev xwayland
 
 # Arch Linux
-sudo pacman -S wayland libxkbcommon systemd-libs libinput mesa seatd xorg-xwayland
+sudo pacman -S wayland libxkbcommon systemd-libs libinput mesa seatd libxcb \
+  xcb-util-cursor xorg-xwayland
 ```
 
 :::
 
-:::note[xwayland-satellite is required]
-ShojiWM uses `xwayland-satellite` to run X11 applications. The recommended way to
-install it is to clone its repository and install directly with Cargo:
+:::note[X11 applications]
+ShojiWM runs X11 applications through
+[`xwayland-satellite`](https://github.com/Supreeeme/xwayland-satellite), which is
+built into ShojiWM: it uses the ShojiWM-specific fork on the `shojiwm` branch of
+[`bea4dev/xwayland-satellite`](https://github.com/bea4dev/xwayland-satellite/tree/shojiwm)
+and runs inside the compositor, so there is nothing to install besides
+`xwayland`. If Xwayland stops, ShojiWM restarts it on the same `DISPLAY`.
 
-```bash
-git clone https://github.com/Supreeeme/xwayland-satellite.git
-cd xwayland-satellite
-cargo install --path ./
-```
+For debugging, a separately installed `xwayland-satellite` can be run as its own
+process instead:
 
-This places the `xwayland-satellite` binary on your `PATH` (typically under
-`~/.cargo/bin`). Install it before starting a session.
-
-**Recommended for ShojiWM:** a ShojiWM-specific fork with hotfixes is available on
-the `shojiwm` branch of
-[`bea4dev/xwayland-satellite`](https://github.com/bea4dev/xwayland-satellite/tree/shojiwm).
-It includes an experimental fix for an issue where Unity tabs cannot be grabbed
-and moved. If you want these fixes and other hotfix support, install that branch
-instead:
-
-```bash
-git clone -b shojiwm https://github.com/bea4dev/xwayland-satellite.git
-cd xwayland-satellite
-cargo install --path ./
-```
-
+| Environment variable | Effect |
+| --- | --- |
+| `SHOJI_XWAYLAND_SATELLITE=external` | run the `xwayland-satellite` found in `PATH` |
+| `SHOJI_XWAYLAND_SATELLITE_PATH=/path/to/xwayland-satellite` | run that binary (also `--xwayland-satellite-path`) |
+| `SHOJI_XWAYLAND_SATELLITE=off` | use Smithay's built-in Xwayland support instead of xwayland-satellite |
 :::
 
 ## Install
@@ -167,7 +158,6 @@ The module installs:
 - `xdg-desktop-portal-shojiwm`
 - the Wayland session entry for display managers
 - the ShojiWM portal preference for screen capture
-- `xwayland-satellite`, when available from your nixpkgs
 
 With `programs.shojiwm.initConfig.enable = true`, the module also initializes
 the ShojiWM TypeScript config directory for the listed users during system
@@ -220,22 +210,24 @@ checking or documentation development tools.
 This means you can keep the current fast edit-and-run workflow while using Nix
 to provide the native build dependencies and the pinned `rusty_v8` archive.
 
-### xwayland-satellite fork
+### External xwayland-satellite
 
-If you need the ShojiWM-specific `xwayland-satellite` fork, override the package
-from the NixOS module:
+xwayland-satellite is built into ShojiWM. To run a separately packaged
+`xwayland-satellite` as its own process instead (for debugging, or to try a
+different branch), enable it in the NixOS module:
 
 ```nix
 {
   programs.shojiwm = {
     enable = true;
+    xwaylandSatellite.enable = true;
     xwaylandSatellite.package =
       inputs.xwayland-satellite-shojiwm.packages.${pkgs.system}.default;
   };
 }
 ```
 
-Where your flake inputs include the fork, for example:
+Where your flake inputs include the package, for example:
 
 ```nix
 {
@@ -244,8 +236,8 @@ Where your flake inputs include the fork, for example:
 }
 ```
 
-You can also set `programs.shojiwm.xwaylandSatellite.package` to any package that
-provides a `bin/xwayland-satellite` executable.
+`programs.shojiwm.xwaylandSatellite.package` accepts any package that provides a
+`bin/xwayland-satellite` executable; it defaults to `pkgs.xwayland-satellite`.
 
 ## Running
 

@@ -23,7 +23,12 @@
   pipewire,
   libdrm,
   dbus,
+  xorg ? { },
+  libxcb ? xorg.libxcb,
+  xcb-util-cursor ? xorg.xcbutilcursor,
   xwayland ? null,
+  # xwayland-satellite is built into ShojiWM. Pass a package here only to run
+  # a separate xwayland-satellite process instead (debugging, other branches).
   xwaylandSatellite ? null,
   rustyV8Archive ? callPackage ./rusty-v8.nix { },
 }:
@@ -103,6 +108,10 @@ rustPlatform.buildRustPackage {
       "smithay-0.7.0" = "sha256-l2IXXk5kaiUzXPc8JFCW7POxvHRDfiFNE1nq5OaT6QQ=";
       "smithay-drm-extras-0.1.0" = "sha256-l2IXXk5kaiUzXPc8JFCW7POxvHRDfiFNE1nq5OaT6QQ=";
       "rustyscript-0.12.3" = "sha256-04yZws8aY6NpyQc0F6fg7CAwYYXer7r+eFABwafP+kU=";
+      # The embedded xwayland-satellite and its workspace crates (one checkout).
+      "xwayland-satellite-0.8.2" = "sha256-cBz3Cxsx42oYPAg8F+W4aV6OivknrVRDy3WEFN9PYCs=";
+      "macros-0.1.0" = "sha256-cBz3Cxsx42oYPAg8F+W4aV6OivknrVRDy3WEFN9PYCs=";
+      "wl_drm-0.1.0" = "sha256-cBz3Cxsx42oYPAg8F+W4aV6OivknrVRDy3WEFN9PYCs=";
     };
   };
 
@@ -118,6 +127,8 @@ rustPlatform.buildRustPackage {
   buildInputs = [
     wayland
     wayland-protocols
+    libxcb
+    xcb-util-cursor
     libxkbcommon
     systemd
     libinput

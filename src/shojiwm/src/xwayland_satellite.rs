@@ -1,3 +1,4 @@
+use smithay::reexports::calloop::channel::Sender;
 use smithay::reexports::rustix::{
     self,
     fs::{OFlags, lstat, mkdir, open, unlink},
@@ -11,12 +12,14 @@ use std::{
     os::{
         fd::{AsRawFd, BorrowedFd, OwnedFd},
         unix::{
-            net::{SocketAddr, UnixListener},
+            net::{SocketAddr, UnixListener, UnixStream},
             process::CommandExt,
         },
     },
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
+    sync::Mutex,
+    time::{Duration, Instant},
 };
 use tracing::{info, warn};
 
@@ -27,6 +30,8 @@ const SATELLITE_LOG_FILE: &str = "xwayland-satellite.log";
 pub struct SatelliteInstance {
     pub display_name: String,
     pub display_number: u32,
+    /// Present when satellite runs in-process; it keeps what a restart needs.
+    pub embedded: Option<EmbeddedSatellite>,
     _unix_guard: UnlinkGuard,
     _lock_guard: UnlinkGuard,
 }
@@ -39,18 +44,56 @@ impl Drop for UnlinkGuard {
     }
 }
 
-pub fn satellite_requested() -> bool {
-    !std::env::var_os("SHOJI_XWAYLAND_SATELLITE")
-        .is_some_and(|value| value == "0" || value == "off")
+/// How xwayland-satellite is run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SatelliteMode {
+    /// In-process, on its own thread (the default).
+    Embedded,
+    /// As a separate process, from this executable path or `PATH` lookup.
+    External(PathBuf),
 }
 
-pub fn spawn_satellite() -> Result<SatelliteInstance, Box<dyn std::error::Error>> {
-    let path = expand_tilde_in_path(
-        std::env::var_os("SHOJI_XWAYLAND_SATELLITE_PATH")
-            .unwrap_or_else(|| OsString::from("xwayland-satellite")),
-    );
+/// The satellite mode chosen by the environment, or `None` when satellite is
+/// disabled and the built-in Xwayland support is used instead.
+///
+/// - `SHOJI_XWAYLAND_SATELLITE=0|off`: disabled.
+/// - `SHOJI_XWAYLAND_SATELLITE_PATH=<path>` (or `--xwayland-satellite-path`):
+///   external, running that binary.
+/// - `SHOJI_XWAYLAND_SATELLITE=external`: external, running the
+///   `xwayland-satellite` found in `PATH`.
+/// - otherwise: embedded.
+pub fn satellite_mode() -> Option<SatelliteMode> {
+    satellite_mode_from(
+        std::env::var_os("SHOJI_XWAYLAND_SATELLITE"),
+        std::env::var_os("SHOJI_XWAYLAND_SATELLITE_PATH"),
+    )
+}
 
-    if !test_listenfd_support(&path) {
+fn satellite_mode_from(setting: Option<OsString>, path: Option<OsString>) -> Option<SatelliteMode> {
+    if setting
+        .as_ref()
+        .is_some_and(|value| value == "0" || value == "off")
+    {
+        return None;
+    }
+    if let Some(path) = path.filter(|path| !path.is_empty()) {
+        return Some(SatelliteMode::External(expand_tilde_in_path(path)));
+    }
+    if setting.is_some_and(|value| value == "external") {
+        return Some(SatelliteMode::External(PathBuf::from("xwayland-satellite")));
+    }
+    Some(SatelliteMode::Embedded)
+}
+
+pub fn satellite_requested() -> bool {
+    satellite_mode().is_some()
+}
+
+/// Start xwayland-satellite as a separate process running `path`.
+pub fn spawn_external_satellite(
+    path: &Path,
+) -> Result<SatelliteInstance, Box<dyn std::error::Error>> {
+    if !test_listenfd_support(path) {
         return Err(format!(
             "{} does not support --test-listenfd-support / -listenfd integration",
             path.display()
@@ -64,20 +107,200 @@ pub fn spawn_satellite() -> Result<SatelliteInstance, Box<dyn std::error::Error>
     let display_name = format!(":{display_number}");
 
     let child = spawn_satellite_process(
-        &path,
+        path,
         &display_name,
         abstract_listener.as_ref(),
         &unix_listener,
     )?;
 
-    spawn_waiter_thread(path, child);
+    spawn_waiter_thread(path.to_path_buf(), child);
 
     Ok(SatelliteInstance {
+        display_name,
+        display_number,
+        embedded: None,
+        _unix_guard: unix_guard,
+        _lock_guard: lock_guard,
+    })
+}
+
+/// Reserve an X11 display for an in-process satellite. Nothing runs yet;
+/// [`EmbeddedSatellite::start`] starts it.
+pub fn reserve_embedded_satellite(
+    events: Sender<SatelliteEvent>,
+) -> Result<SatelliteInstance, Box<dyn std::error::Error>> {
+    ensure_x11_unix_dir()?;
+    let (display_number, _lock_fd, lock_guard, abstract_listener, unix_listener, unix_guard) =
+        reserve_x11_display(0)?;
+    let display_name = format!(":{display_number}");
+
+    let listeners = abstract_listener
+        .into_iter()
+        .chain(std::iter::once(unix_listener))
+        .map(OwnedFd::from)
+        .collect();
+
+    Ok(SatelliteInstance {
+        embedded: Some(EmbeddedSatellite {
+            display_name: display_name.clone(),
+            listeners,
+            flags: glamor_flags(),
+            events,
+            started_at: None,
+            restart_delay: INITIAL_RESTART_DELAY,
+            generation: 0,
+        }),
         display_name,
         display_number,
         _unix_guard: unix_guard,
         _lock_guard: lock_guard,
     })
+}
+
+/// What the embedded satellite thread reports to the compositor's event loop.
+#[derive(Debug)]
+pub enum SatelliteEvent {
+    /// Xwayland is up and satellite manages it.
+    Ready {
+        generation: u64,
+        display: String,
+        xwayland_pid: u32,
+    },
+    /// The satellite thread ended: Xwayland exited, or satellite panicked.
+    Exited { generation: u64, panicked: bool },
+}
+
+/// Delay before the first restart after a quick failure.
+const INITIAL_RESTART_DELAY: Duration = Duration::from_millis(500);
+/// Longest delay between restarts while satellite keeps failing.
+const MAX_RESTART_DELAY: Duration = Duration::from_secs(30);
+/// A run this long counts as healthy and resets the restart delay.
+const HEALTHY_RUN: Duration = Duration::from_secs(60);
+
+/// xwayland-satellite running in-process.
+///
+/// Satellite still talks to the compositor over the Wayland protocol, through
+/// one end of a socket pair that the compositor inserts as a client; only the
+/// process boundary is gone. The X11 display (lock file and listening sockets)
+/// is reserved once and handed to every run, so a restarted satellite serves the
+/// same `DISPLAY`.
+pub struct EmbeddedSatellite {
+    display_name: String,
+    /// The display's listening sockets, kept for restarts; each run gets
+    /// duplicates, which it passes on to Xwayland.
+    listeners: Vec<OwnedFd>,
+    flags: Vec<String>,
+    events: Sender<SatelliteEvent>,
+    started_at: Option<Instant>,
+    restart_delay: Duration,
+    /// Identifies the current run, so a late event from an older one is ignored.
+    generation: u64,
+}
+
+impl EmbeddedSatellite {
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// Start satellite on a new thread. Returns the compositor's end of its
+    /// Wayland connection, to be inserted as a client.
+    pub fn start(&mut self) -> io::Result<UnixStream> {
+        let (compositor_end, satellite_end) = UnixStream::pair()?;
+        let listenfds = self
+            .listeners
+            .iter()
+            .map(OwnedFd::try_clone)
+            .collect::<io::Result<Vec<_>>>()?;
+        self.generation += 1;
+        let generation = self.generation;
+        let data = EmbeddedRunData {
+            display: self.display_name.clone(),
+            listenfds: Mutex::new(listenfds),
+            flags: self.flags.clone(),
+            server: Mutex::new(Some(satellite_end)),
+            events: self.events.clone(),
+            generation,
+        };
+        let events = self.events.clone();
+        std::thread::Builder::new()
+            .name("xwayland-satellite".into())
+            .spawn(move || {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    satellite::main(data);
+                }));
+                let panicked = result.is_err();
+                let _ = events.send(SatelliteEvent::Exited {
+                    generation,
+                    panicked,
+                });
+            })?;
+        self.started_at = Some(Instant::now());
+        info!(
+            display = %self.display_name,
+            generation,
+            "started embedded xwayland-satellite"
+        );
+        Ok(compositor_end)
+    }
+
+    /// How long to wait before restarting after the current run ended: short
+    /// after a long healthy run, growing while satellite keeps failing fast.
+    pub fn next_restart_delay(&mut self) -> Duration {
+        let ran = self
+            .started_at
+            .map_or(Duration::ZERO, |start| start.elapsed());
+        self.restart_delay = if ran >= HEALTHY_RUN {
+            INITIAL_RESTART_DELAY
+        } else {
+            (self.restart_delay * 2).min(MAX_RESTART_DELAY)
+        };
+        self.restart_delay
+    }
+}
+
+/// `-glamor` for Xwayland, from `SHOJI_XWAYLAND_SATELLITE_GLAMOR`.
+fn glamor_flags() -> Vec<String> {
+    std::env::var("SHOJI_XWAYLAND_SATELLITE_GLAMOR")
+        .ok()
+        .filter(|glamor| matches!(glamor.as_str(), "gl" | "es" | "none"))
+        .map(|glamor| vec!["-glamor".to_owned(), glamor])
+        .unwrap_or_default()
+}
+
+/// What satellite needs from its embedder, for one run.
+struct EmbeddedRunData {
+    display: String,
+    listenfds: Mutex<Vec<OwnedFd>>,
+    flags: Vec<String>,
+    server: Mutex<Option<UnixStream>>,
+    events: Sender<SatelliteEvent>,
+    generation: u64,
+}
+
+impl satellite::RunData for EmbeddedRunData {
+    fn display(&self) -> Option<&str> {
+        Some(&self.display)
+    }
+
+    fn listenfds(&mut self) -> Vec<OwnedFd> {
+        std::mem::take(&mut *self.listenfds.lock().unwrap_or_else(|p| p.into_inner()))
+    }
+
+    fn flags(&self) -> &[String] {
+        &self.flags
+    }
+
+    fn server(&self) -> Option<UnixStream> {
+        self.server.lock().unwrap_or_else(|p| p.into_inner()).take()
+    }
+
+    fn xwayland_ready(&self, display: String, pid: u32) {
+        let _ = self.events.send(SatelliteEvent::Ready {
+            generation: self.generation,
+            display,
+            xwayland_pid: pid,
+        });
+    }
 }
 
 fn expand_tilde_in_path(path: OsString) -> PathBuf {
@@ -342,6 +565,50 @@ fn spawn_waiter_thread(path: PathBuf, mut child: Child) {
                 warn!(path = ?path, ?error, "failed waiting for xwayland-satellite");
             }
         });
+}
+
+#[cfg(test)]
+mod mode_tests {
+    use super::{SatelliteMode, satellite_mode_from};
+    use std::{ffi::OsString, path::PathBuf};
+
+    fn mode(setting: Option<&str>, path: Option<&str>) -> Option<SatelliteMode> {
+        satellite_mode_from(setting.map(OsString::from), path.map(OsString::from))
+    }
+
+    #[test]
+    fn embedded_by_default() {
+        assert_eq!(mode(None, None), Some(SatelliteMode::Embedded));
+        assert_eq!(mode(Some("1"), None), Some(SatelliteMode::Embedded));
+        assert_eq!(mode(None, Some("")), Some(SatelliteMode::Embedded));
+    }
+
+    #[test]
+    fn external_from_path_lookup_or_an_explicit_binary() {
+        assert_eq!(
+            mode(Some("external"), None),
+            Some(SatelliteMode::External(PathBuf::from("xwayland-satellite")))
+        );
+        assert_eq!(
+            mode(None, Some("/opt/xwls/xwayland-satellite")),
+            Some(SatelliteMode::External(PathBuf::from(
+                "/opt/xwls/xwayland-satellite"
+            )))
+        );
+        // An explicit binary wins over the PATH lookup.
+        assert_eq!(
+            mode(Some("external"), Some("/opt/xwls/xwayland-satellite")),
+            Some(SatelliteMode::External(PathBuf::from(
+                "/opt/xwls/xwayland-satellite"
+            )))
+        );
+    }
+
+    #[test]
+    fn off_disables_satellite_even_with_a_path() {
+        assert_eq!(mode(Some("off"), None), None);
+        assert_eq!(mode(Some("0"), Some("/opt/xwls/xwayland-satellite")), None);
+    }
 }
 
 #[cfg(all(test, target_os = "linux"))]

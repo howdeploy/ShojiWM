@@ -25,9 +25,8 @@ ShojiWM は1つのスクリプト `dist/install.sh` でソースからインス�
   - `libinput`
   - `libgbm`
   - `libseat`
-  - `xwayland` —— Xwayland サーバー本体（下記の `xwayland-satellite` が利用します）
-- [`xwayland-satellite`](https://github.com/Supreeeme/xwayland-satellite) ——
-  X11 / Xwayland アプリの実行に必要（下記の注記参照）
+  - `libxcb` と `xcb-util-cursor` —— 内蔵の xwayland-satellite が使います
+  - `xwayland` —— X11 アプリの実行に使う Xwayland サーバー本体（下記の注記参照）
 - `sudo` —— インストーラーが `/usr` にファイルをコピーし、セッションを登録するため
 
 :::note[ネイティブライブラリのインストール]
@@ -36,39 +35,32 @@ ShojiWM は1つのスクリプト `dist/install.sh` でソースからインス�
 ```bash
 # Debian / Ubuntu
 sudo apt install libwayland-dev libxkbcommon-dev libudev-dev libinput-dev \
-  libgbm-dev libseat-dev xwayland
+  libgbm-dev libseat-dev libxcb1-dev libxcb-cursor-dev xwayland
 
 # Arch Linux
-sudo pacman -S wayland libxkbcommon systemd-libs libinput mesa seatd xorg-xwayland
+sudo pacman -S wayland libxkbcommon systemd-libs libinput mesa seatd libxcb \
+  xcb-util-cursor xorg-xwayland
 ```
 
 :::
 
-:::note[xwayland-satellite は必須です]
-ShojiWM は X11 アプリの実行に `xwayland-satellite` を使用します。推奨は、リポジトリを
-クローンして Cargo で直接インストールする方法です。
-
-```bash
-git clone https://github.com/Supreeeme/xwayland-satellite.git
-cd xwayland-satellite
-cargo install --path ./
-```
-
-これで `xwayland-satellite` バイナリが `PATH`（通常は `~/.cargo/bin`）に置かれます。
-セッションを起動する前にインストールしておいてください。
-
-**ShojiWM 向けの推奨:** ホットフィックスを含む ShojiWM 専用のフォークが、
+:::note[X11 アプリについて]
+ShojiWM は X11 アプリを
+[`xwayland-satellite`](https://github.com/Supreeeme/xwayland-satellite) で動かします。
+xwayland-satellite は ShojiWM に内蔵されています。
 [`bea4dev/xwayland-satellite`](https://github.com/bea4dev/xwayland-satellite/tree/shojiwm)
-の `shojiwm` ブランチにあります。Unity のタブを掴んで移動できない問題への試験的な修正が
-含まれています。これらの修正やその他のホットフィックスのサポートが必要な場合は、こちらの
-ブランチをインストールすることを推奨します。
+の `shojiwm` ブランチにある ShojiWM 専用フォークを、コンポジターの中で動かすため、
+`xwayland` 以外に別途インストールするものはありません。Xwayland が停止した場合は、
+ShojiWM が同じ `DISPLAY` で自動的に起動し直します。
 
-```bash
-git clone -b shojiwm https://github.com/bea4dev/xwayland-satellite.git
-cd xwayland-satellite
-cargo install --path ./
-```
+デバッグ用に、別途インストールした `xwayland-satellite` を独立したプロセスとして
+動かすこともできます。
 
+| 環境変数 | 動作 |
+| --- | --- |
+| `SHOJI_XWAYLAND_SATELLITE=external` | `PATH` 上の `xwayland-satellite` を起動する |
+| `SHOJI_XWAYLAND_SATELLITE_PATH=/path/to/xwayland-satellite` | 指定したバイナリを起動する（`--xwayland-satellite-path` でも可） |
+| `SHOJI_XWAYLAND_SATELLITE=off` | xwayland-satellite を使わず、Smithay 内蔵の Xwayland サポートを使う |
 :::
 
 ## インストール
@@ -165,7 +157,6 @@ module は次をインストールします。
 - `xdg-desktop-portal-shojiwm`
 - ログインマネージャー用の Wayland セッション
 - スクリーンキャプチャ用の ShojiWM portal 設定
-- nixpkgs に存在する場合は `xwayland-satellite`
 
 `programs.shojiwm.initConfig.enable = true` を設定すると、module は system
 activation 時に指定ユーザーの ShojiWM TypeScript 設定ディレクトリを初期化します。
@@ -217,22 +208,24 @@ cargo run --release -p shoji_wm -- --dev
 つまり、Nix はネイティブ依存と固定済みの `rusty_v8` archive を揃えるために使い、
 TS 設定や runtime の編集は今まで通り素早く試せます。
 
-### xwayland-satellite fork
+### 外部の xwayland-satellite
 
-ShojiWM 向けの `xwayland-satellite` fork が必要な場合は、NixOS module の package option
-で差し替えます。
+xwayland-satellite は ShojiWM に内蔵されています。デバッグや別ブランチの試用などで、
+別途パッケージ化した `xwayland-satellite` を独立したプロセスとして動かしたい場合は、
+NixOS module で有効にします。
 
 ```nix
 {
   programs.shojiwm = {
     enable = true;
+    xwaylandSatellite.enable = true;
     xwaylandSatellite.package =
       inputs.xwayland-satellite-shojiwm.packages.${pkgs.system}.default;
   };
 }
 ```
 
-flake input には、例えば次のように fork を追加します。
+flake input には、例えば次のように package を追加します。
 
 ```nix
 {
@@ -242,7 +235,7 @@ flake input には、例えば次のように fork を追加します。
 ```
 
 `programs.shojiwm.xwaylandSatellite.package` には、`bin/xwayland-satellite` を提供する任意の
-package を指定できます。
+package を指定できます。既定値は `pkgs.xwayland-satellite` です。
 
 ## 実行
 

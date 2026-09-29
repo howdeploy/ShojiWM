@@ -68,8 +68,12 @@ in
 
     xwaylandSatellite.enable = lib.mkOption {
       type = lib.types.bool;
-      default = true;
-      description = "Whether to configure ShojiWM to use xwayland-satellite.";
+      default = false;
+      description = ''
+        Whether to run a separately packaged xwayland-satellite as its own
+        process instead of the one built into ShojiWM. Useful for debugging or
+        for trying another xwayland-satellite branch.
+      '';
     };
 
     xwaylandSatellite.package = lib.mkOption {
@@ -77,8 +81,9 @@ in
       default = defaultSatellite;
       defaultText = lib.literalExpression "pkgs.xwayland-satellite or null";
       description = ''
-        xwayland-satellite package used by ShojiWM. Override this with a forked
-        package, for example a Unity compatibility branch, when needed.
+        xwayland-satellite package run as a separate process when
+        `xwaylandSatellite.enable` is set. ShojiWM's built-in xwayland-satellite
+        is used otherwise.
       '';
     };
   };

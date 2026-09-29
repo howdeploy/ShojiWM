@@ -128,8 +128,8 @@ pub fn apply_runtime_env_updates(updates: RuntimeEnvUpdates, reason: &'static st
             continue;
         }
         match operation.value {
-            Some(value) => unsafe { std::env::set_var(&operation.key, value) },
-            None => unsafe { std::env::remove_var(&operation.key) },
+            Some(value) => crate::process_env::set_var(&operation.key, value),
+            None => crate::process_env::remove_var(&operation.key),
         }
     }
 

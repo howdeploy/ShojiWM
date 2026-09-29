@@ -40,6 +40,7 @@ pub mod input;
 pub mod install_paths;
 pub mod keyboard_layout;
 pub mod presentation;
+pub mod process_env;
 pub mod profiler;
 pub mod protocols;
 pub mod runtime_debug;
@@ -144,13 +145,13 @@ fn panic_payload_message(panic_info: &panic::PanicHookInfo<'_>) -> String {
 
 fn apply_runtime_overrides(args: &CliArgs) {
     if !args.tty_outputs.is_empty() {
-        unsafe { std::env::set_var("SHOJI_TTY_OUTPUT", args.tty_outputs.join(",")) };
+        process_env::set_var("SHOJI_TTY_OUTPUT", args.tty_outputs.join(","));
     }
     if let Some(path) = args.xwayland_satellite_path.as_deref() {
-        unsafe { std::env::set_var("SHOJI_XWAYLAND_SATELLITE_PATH", path) };
+        process_env::set_var("SHOJI_XWAYLAND_SATELLITE_PATH", path);
     }
     if let Some(glamor) = args.xwayland_satellite_glamor.as_deref() {
-        unsafe { std::env::set_var("SHOJI_XWAYLAND_SATELLITE_GLAMOR", glamor) };
+        process_env::set_var("SHOJI_XWAYLAND_SATELLITE_GLAMOR", glamor);
     }
 }
 
@@ -162,15 +163,13 @@ fn sanitize_inherited_compositor_environment() {
         "I3SOCK",
         "LABWC_PID",
     ] {
-        unsafe { std::env::set_var(key, "") };
+        process_env::set_var(key, "");
     }
 
-    unsafe {
-        std::env::set_var("XDG_CURRENT_DESKTOP", "ShojiWM");
-        std::env::set_var("XDG_SESSION_DESKTOP", "ShojiWM");
-        std::env::set_var("XDG_SESSION_TYPE", "wayland");
-        std::env::set_var("DESKTOP_SESSION", "ShojiWM");
-    }
+    process_env::set_var("XDG_CURRENT_DESKTOP", "ShojiWM");
+    process_env::set_var("XDG_SESSION_DESKTOP", "ShojiWM");
+    process_env::set_var("XDG_SESSION_TYPE", "wayland");
+    process_env::set_var("DESKTOP_SESSION", "ShojiWM");
 }
 
 #[derive(Debug, Clone)]
@@ -301,7 +300,7 @@ fn init_logging(
         .truncate(true)
         .open(&latest_log)?;
     let env_filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn,shoji_wm=info"));
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn,shoji_wm=info,xwayland_satellite=info"));
 
     // The compositor runs a single-threaded event loop, so a synchronous
     // writer here puts a filesystem write directly in the path of input and

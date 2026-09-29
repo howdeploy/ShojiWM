@@ -65,23 +65,28 @@ input.global = {
 
 ## Reading the active keyboard layout
 
-The compositor publishes the seat's actual XKB layout to
-`$XDG_RUNTIME_DIR/shojiwm-$WAYLAND_DISPLAY-keyboard.json` for external panels:
+Subscribe to the seat's actual XKB layout from TypeScript:
 
-```json
-{"pid": 1234, "index": 0, "name": "English (US)"}
+```ts
+const unsubscribe = COMPOSITOR.event.onKeyboardLayoutChange((event) => {
+  console.log(event.index, event.name); // 0, "English (US)"
+  // Write your panel's JSON status or broadcast through your IPC server here.
+});
 ```
 
 `index` is the zero-based XKB layout index and `name` is its XKB display name.
-The file contains no key events or typed text. It is written on the first
-scheduler tick and whenever the layout changes, with owner-only permissions
-and an atomic replacement. Watch the parent directory for replacements,
-rather than holding the original file open. No file is published without
-`XDG_RUNTIME_DIR`.
+The event contains no key events or typed text. Register during config loading
+or `onEnable` to receive the initial layout on the first scheduler tick after
+enable, including after a config reload. Later ticks report changes to either
+field, including keymap changes; unchanged layouts emit nothing. Multiple
+changes before a tick are coalesced to the latest layout. The scheduler samples
+the seat at its existing cadence (up to 250 ms when idle).
 
-The file may remain after the compositor exits; readers should stop showing
-it when the Wayland session disconnects. `pid` identifies the publisher.
-A failed write is logged once and retried on the next layout change.
+Registration returns an unsubscribe function. The listener is synchronous; keep
+it short and handle errors from your chosen JSON/IPC transport. The compositor
+does not choose a transport or write a status file. Configurations using the
+earlier draft's `shojiwm-$WAYLAND_DISPLAY-keyboard.json` must now publish that
+file from TypeScript or migrate their panel to IPC.
 
 ## Pointer (mouse) settings
 

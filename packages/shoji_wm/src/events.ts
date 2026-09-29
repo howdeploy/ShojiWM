@@ -58,6 +58,15 @@ export interface InputDeviceChangeEvent {
 
 export type InputDeviceChangeListener = (event: InputDeviceChangeEvent) => void;
 
+export interface KeyboardLayoutChangeEvent {
+  /** Zero-based index in the seat's current XKB keymap. */
+  readonly index: number;
+  /** XKB display name, for example "English (US)". */
+  readonly name: string;
+}
+
+export type KeyboardLayoutChangeListener = (event: KeyboardLayoutChangeEvent) => void;
+
 export interface WindowResizeEdges {
   left: boolean;
   right: boolean;
@@ -449,6 +458,12 @@ export interface CompositorEventController {
    */
   onInputDeviceChange(listener: InputDeviceChangeListener): () => void;
   /**
+   * Reports the active seat layout on the first scheduler tick after enable/reload
+   * and when its index or name changes. Updates before a tick are coalesced.
+   * Write shell status or send IPC from this synchronous listener.
+   */
+  onKeyboardLayoutChange(listener: KeyboardLayoutChangeListener): () => void;
+  /**
    * Fires synchronously on every pointer move event.
    * Keep the listener short: input processing waits for it to return.
    * ポインター移動イベントのたびに同期的に発火します。
@@ -549,6 +564,8 @@ export interface CompositorEventController {
   /** @internal */
   emitInputDeviceChange(event: InputDeviceChangeEvent): void;
   /** @internal */
+  emitKeyboardLayoutChange(event: KeyboardLayoutChangeEvent): void;
+  /** @internal */
   emitPointerMove(event: PointerMoveEvent): boolean;
   /** @internal */
   emitPointerMoveAsync(event: PointerMoveEvent): Promise<boolean>;
@@ -591,6 +608,7 @@ export function createCompositorEventController(): CompositorEventController {
   const activateRequestListeners = new Set<WindowActivateRequestListener>();
   const outputChangeListeners = new Set<OutputChangeListener>();
   const inputDeviceChangeListeners = new Set<InputDeviceChangeListener>();
+  const keyboardLayoutChangeListeners = new Set<KeyboardLayoutChangeListener>();
   const pointerMoveListeners = new Set<PointerMoveListener>();
   const pointerMoveAsyncListeners = new Set<PointerMoveAsyncListener>();
   const gestureSwipeListeners = new Set<GestureSwipeListener>();
@@ -668,6 +686,10 @@ export function createCompositorEventController(): CompositorEventController {
     onInputDeviceChange(listener) {
       inputDeviceChangeListeners.add(listener);
       return () => inputDeviceChangeListeners.delete(listener);
+    },
+    onKeyboardLayoutChange(listener) {
+      keyboardLayoutChangeListeners.add(listener);
+      return () => keyboardLayoutChangeListeners.delete(listener);
     },
     onPointerMove(listener) {
       pointerMoveListeners.add(listener);
@@ -804,6 +826,11 @@ export function createCompositorEventController(): CompositorEventController {
     },
     emitInputDeviceChange(event) {
       for (const listener of inputDeviceChangeListeners) {
+        listener(event);
+      }
+    },
+    emitKeyboardLayoutChange(event) {
+      for (const listener of keyboardLayoutChangeListeners) {
         listener(event);
       }
     },

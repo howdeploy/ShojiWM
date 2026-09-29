@@ -400,7 +400,6 @@ pub struct ShojiWM {
     pub runtime_gesture_swipe_async_enabled: bool,
     pub runtime_gesture_swipe: Option<RuntimeGestureSwipeState>,
     pub current_keyboard_modifiers: ModifiersState,
-    pub published_keyboard_layout: Option<crate::keyboard_layout::KeyboardLayoutStatus>,
     // Modifier-only tap detection (e.g. "Super"). If no other input occurs
     // between press and release, the release is treated as a tap.
     pub tap_pressed_keys: u32,
@@ -1723,7 +1722,6 @@ impl ShojiWM {
             runtime_gesture_swipe_async_enabled: false,
             runtime_gesture_swipe: None,
             current_keyboard_modifiers: ModifiersState::default(),
-            published_keyboard_layout: None,
             tap_pressed_keys: 0,
             tap_armed_modifier: None,
             tap_interrupted: false,
@@ -2659,6 +2657,7 @@ impl ShojiWM {
         }
 
         self.decoration_evaluator = DecorationRuntimeEvaluator::Embedded(next);
+        self.runtime_scheduler_enabled = true;
         self.mark_all_window_decoration_policies_reloaded();
         self.config_error_report = None;
         // The overlay was just cleared: effect failures that are still there must show up again.

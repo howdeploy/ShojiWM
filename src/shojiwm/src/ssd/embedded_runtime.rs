@@ -221,6 +221,8 @@ pub struct NativeSchedulerRequest {
     pub now_ms: u64,
     pub display_state: std::collections::BTreeMap<String, WaylandOutputSnapshot>,
     pub input_state: std::collections::BTreeMap<String, RuntimeInputDeviceSnapshot>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub keyboard_layout: Option<crate::keyboard_layout::KeyboardLayoutSnapshot>,
 }
 
 enum BridgeRequest {

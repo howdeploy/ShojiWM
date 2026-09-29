@@ -655,7 +655,6 @@ impl ShojiWM {
                     )
                     .unwrap_or(KeyboardAction::Forward);
 
-                self.sync_keyboard_layout();
                 match action {
                     KeyboardAction::Quit => self.shutdown(),
                     KeyboardAction::ReloadConfig => self.reload_decoration_runtime(),

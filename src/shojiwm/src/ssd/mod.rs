@@ -970,10 +970,28 @@ pub struct EffectOutsets {
     pub bottom: i32,
 }
 
+/// The part of a layer surface that a backdrop `behind` effect covers. The effect
+/// captures, runs its pipeline and invalidates over the bounding box of that part
+/// (plus outsets) instead of over the whole surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EffectRegion {
+    /// The whole surface.
+    #[default]
+    Surface,
+    /// The surface's input region (`wl_surface.set_input_region`). A surface without
+    /// one takes input everywhere, so this falls back to the whole surface.
+    Input,
+    /// The blur region the client asked for through ext-background-effect. No
+    /// region means nothing is drawn.
+    BlurRegion,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct WindowEffectSlot {
     pub effect: CompiledEffect,
     pub outsets: EffectOutsets,
+    /// Layer `behind` backdrop effects only; every other slot uses `Surface`.
+    pub region: EffectRegion,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -982,6 +1000,12 @@ pub struct WindowEffectConfig {
     pub behind_root_surface: Option<WindowEffectSlot>,
     pub in_front: Option<WindowEffectSlot>,
     pub replace: Option<WindowEffectSlot>,
+    /// Replaces the window's subsurfaces separately from the rest of the window.
+    /// While this or `behind_subsurfaces` is set, window sources of the other slots
+    /// leave subsurfaces out.
+    pub replace_subsurfaces: Option<WindowEffectSlot>,
+    /// Drawn behind the window's subsurfaces, over their own bounds.
+    pub behind_subsurfaces: Option<WindowEffectSlot>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1919,7 +1943,7 @@ fn layout_box_children(
 
     let mut cursor = direction.main_origin_resolved(content_rect) + main_offset;
     let mut children = vec![None; node.children.len()];
-    let layout_debug_enabled = std::env::var_os("SHOJI_GAP_LAYOUT_CHILD_DEBUG").is_some();
+    let layout_debug_enabled = crate::env_flag!("SHOJI_GAP_LAYOUT_CHILD_DEBUG");
     let direction_name = match direction {
         LayoutDirection::Row => "row",
         LayoutDirection::Column => "column",

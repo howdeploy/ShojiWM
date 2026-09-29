@@ -64,6 +64,37 @@ COMPOSITOR.effect.popup = (popup) => {
 };
 ```
 
+### Narrowing a layer effect to a region
+
+A layer's `behind` backdrop covers the whole layer surface by default: the
+backdrop is captured over it, the pipeline runs over it, and any damage anywhere
+under it re-runs the effect. Shell toolkits often map surfaces much larger than
+what they draw — a fixed-size surface around an animated pill, or one full-screen
+surface per monitor with the bar cut out by an input mask — which makes that
+expensive. Set `region` to cover only the part that draws:
+
+```ts
+const BAR_BLUR = compileLayerEffect({
+  input: backdropSource(),
+  region: 'input', // the input region, e.g. QuickShell's `mask`
+  outsets: 16,     // what draws past the region: antialiasing, merging shapes
+  alpha: 'preserve',
+  pipeline: [dualKawaseBlur({radius: 4, passes: 2})],
+});
+```
+
+| `region` | Covers |
+|---|---|
+| `'surface'` (default) | The whole surface. |
+| `'input'` | The bounding box of the input region (`wl_surface.set_input_region`). A surface without one takes input everywhere, so this is then the whole surface. |
+| `'blur-region'` | The bounding box of the blur region the client asked for through ext-background-effect (QuickShell's `BackgroundEffect.blurRegion`). Nothing is drawn while the client asks for none. |
+
+The capture, the pipeline, `layerSource()` and damage-based invalidation all
+follow the region, plus `outsets`. Both regions are part of the same commit as
+the buffer, so the effect never lags a frame behind an animated shape. Anything
+the surface draws outside the region gets no backdrop. Only a backdrop `behind`
+accepts a region other than `'surface'`.
+
 ## Building an effect
 
 An effect is **a source input + a pipeline of stages**. Compile it with the
@@ -110,6 +141,41 @@ to that entire image; subsurfaces are not drawn a second time above it.
 Popups remain independently composed. A root-surface source continues to
 exclude subsurfaces.
 
+### Subsurfaces
+
+Subsurfaces (embedded video, previews, some browser content) may reach outside
+the window, where a full window source cannot cover them. Two window-only
+slots handle them separately, over their own bounds: `replaceSubsurfaces`
+replaces them, and `behindSubsurfaces` is drawn behind them (plus its
+`outsets`), e.g. for a drop shadow.
+
+```ts
+COMPOSITOR.effect.window = () => ({
+  replace: DISSOLVE,
+  replaceSubsurfaces: DISSOLVE,
+  behind: SHADOW,
+  behindSubsurfaces: SHADOW,
+});
+```
+
+- `windowSource()` in these slots reads the subsurfaces; `behindSubsurfaces`
+  sees them before `replaceSubsurfaces`. While either slot is set, the window
+  sources of all other slots leave subsurfaces out (root surface plus
+  server-side decorations only).
+- `behindSubsurfaces` sits directly behind its subsurfaces, so for a
+  subsurface inside the window it is drawn over the window's content.
+- Subsurfaces above and below the root surface are processed as two groups so
+  their stacking order is kept. Without a `replace` effect, the lower group
+  stays between the client and its decorations; with one, it is drawn beneath
+  the replacement.
+- The texture covers the subsurfaces, not the window. To line a mask up with
+  the window, compute it with `effect_frame_uv(effect)` (see
+  [the shader contract](#the-shader_main-contract)); the same shader then
+  produces one continuous mask across the window and subsurface slots.
+- A failing effect falls back to drawing the subsurfaces as they are.
+- TTY backend only. Close animations render from a frozen snapshot of the
+  client area, which does not use these slots.
+
 ### Stages
 
 | Stage | Purpose |
@@ -132,8 +198,8 @@ For `dualKawaseBlur`, `radius` defaults to `8` and controls the sampling offset;
 handles bound by name).
 
 Uniform values may be numbers or 2/3/4-component arrays, and each component may
-be a signal. `tex`, `effect_texture_size_px`, and `effect_content_rect_px` are
-reserved compositor bindings and cannot be used as custom uniform or texture
+be a signal. `tex`, `effect_texture_size_px`, `effect_content_rect_px`, and
+`effect_frame_rect_px` are reserved compositor bindings and cannot be used as custom uniform or texture
 names.
 
 ```ts
@@ -366,6 +432,7 @@ struct EffectContext {
     vec2 texture_uv;       // normalized coordinates over the full working texture
     vec2 texture_size_px;  // full working-texture size in physical pixels
     vec4 content_rect_px;  // visible content: x, y, width, height in that texture
+    vec4 frame_rect_px;    // the window the effect belongs to, in that texture
 };
 ```
 
@@ -376,6 +443,7 @@ That gives you these built-ins for free inside `shader_main`:
 | `effect.texture_uv` | `vec2` | Normalized coordinates over the complete texture, including capture padding |
 | `effect.texture_size_px` | `vec2` | Complete working-texture size in physical pixels |
 | `effect.content_rect_px` | `vec4` | Visible content rectangle as `(x, y, width, height)` inside the texture |
+| `effect.frame_rect_px` | `vec4` | For window effects, the window's own rectangle (without `outsets`) inside the texture, even when the texture covers something else (`replaceSubsurfaces`). Otherwise the content rectangle |
 | `tex` | `sampler2D` | This stage's pipeline input; sample it with `texture2D(tex, effect.texture_uv)` |
 
 All `*_px` values are physical pixels. ShojiWM also provides:
@@ -386,6 +454,8 @@ All `*_px` values are physical pixels. ShojiWM also provides:
 | `effect_content_px(effect)` | Current fragment position relative to the visible content's top-left |
 | `effect_content_uv(effect)` | Content-relative normalized coordinates; `0.0`–`1.0` over visible content and outside that range in padding |
 | `effect_texture_uv_from_content_px(effect, px)` | Convert content-relative physical pixels back to texture UV for sampling |
+| `effect_frame_px(effect)` | Current fragment position relative to the frame's top-left |
+| `effect_frame_uv(effect)` | Frame-relative normalized coordinates; `0.0`–`1.0` over the window, outside that range beyond it |
 
 Use texture UV for sampling and content coordinates for geometry tied to the
 visible rectangle. The content rectangle can start at a non-zero offset because

@@ -10,6 +10,7 @@ pub mod image_copy_capture_render;
 pub mod rounded;
 pub mod screencopy_render;
 pub mod shader_effect;
+pub mod signature;
 pub mod snapshot;
 pub mod text;
 pub mod transform_probe_tests;

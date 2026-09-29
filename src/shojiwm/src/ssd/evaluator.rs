@@ -25,7 +25,7 @@ use super::window_model::{
 };
 use super::{
     BackgroundEffectConfig, DecorationBridgeError, DecorationLayoutError, DecorationNode,
-    DecorationTree, EffectInput, WindowEffectConfig, WindowTransform, decode_tree_json,
+    DecorationTree, EffectInput, EffectRegion, WindowEffectConfig, WindowTransform, decode_tree_json,
 };
 use crate::{
     activation_environment::{RuntimeEnvUpdates, apply_runtime_env_updates},
@@ -533,6 +533,18 @@ fn validate_popup_effect_config(
             .replace
             .as_ref()
             .is_some_and(|slot| !is_popup_source(slot))
+        // Subsurfaces are split out of toplevel windows only.
+        || effects.replace_subsurfaces.is_some()
+        || effects.behind_subsurfaces.is_some()
+        // Regions narrow layer backdrops only.
+        || [
+            &effects.behind,
+            &effects.behind_root_surface,
+            &effects.in_front,
+            &effects.replace,
+        ]
+        .into_iter()
+        .any(slot_narrowed_to_region)
     {
         return Err(DecorationBridgeError::InvalidEffectInput);
     }
@@ -560,10 +572,26 @@ fn validate_layer_effect_config(
             .replace
             .as_ref()
             .is_some_and(|slot| !is_layer_source(slot))
+        || effects.replace_subsurfaces.is_some()
+        || effects.behind_subsurfaces.is_some()
+        // Only a backdrop `behind` can be narrowed to a region: the layer itself is
+        // still drawn whole, so every other slot has to cover the whole surface.
+        || effects
+            .behind
+            .as_ref()
+            .is_some_and(|slot| slot.region != EffectRegion::Surface && !slot.effect.is_backdrop())
+        || [&effects.behind_root_surface, &effects.in_front, &effects.replace]
+            .into_iter()
+            .any(slot_narrowed_to_region)
     {
         return Err(DecorationBridgeError::InvalidEffectInput);
     }
     Ok(effects)
+}
+
+fn slot_narrowed_to_region(slot: &Option<super::WindowEffectSlot>) -> bool {
+    slot.as_ref()
+        .is_some_and(|slot| slot.region != EffectRegion::Surface)
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]
@@ -7836,11 +7864,55 @@ COMPOSITOR.event.onPointerMoveAsync(() => {});
             behind: Some(WindowEffectSlot {
                 effect,
                 outsets: EffectOutsets::default(),
+                region: Default::default(),
             }),
             ..Default::default()
         };
 
         assert!(validate_popup_effect_config(effects).is_ok());
+    }
+
+    #[test]
+    fn only_layer_backdrop_behind_accepts_a_region() {
+        let effect = |input| CompiledEffect {
+            input,
+            capture_padding: 0,
+            invalidate: EffectInvalidationPolicy::Always,
+            pipeline: Vec::new(),
+            alpha: EffectAlphaMode::Preserve,
+        };
+        let slot = |input, region| {
+            Some(WindowEffectSlot {
+                effect: effect(input),
+                outsets: EffectOutsets::default(),
+                region,
+            })
+        };
+        let layer_source = || EffectInput::LayerSource(WindowSourceInclude::Full);
+
+        let backdrop_behind = WindowEffectConfig {
+            behind: slot(EffectInput::Backdrop, EffectRegion::Input),
+            ..Default::default()
+        };
+        assert!(validate_layer_effect_config(backdrop_behind).is_ok());
+
+        let layer_source_behind = WindowEffectConfig {
+            behind: slot(layer_source(), EffectRegion::Input),
+            ..Default::default()
+        };
+        assert!(validate_layer_effect_config(layer_source_behind).is_err());
+
+        let in_front = WindowEffectConfig {
+            in_front: slot(layer_source(), EffectRegion::BlurRegion),
+            ..Default::default()
+        };
+        assert!(validate_layer_effect_config(in_front).is_err());
+
+        let popup_behind = WindowEffectConfig {
+            behind: slot(EffectInput::PopupSource(WindowSourceInclude::Full), EffectRegion::Input),
+            ..Default::default()
+        };
+        assert!(validate_popup_effect_config(popup_behind).is_err());
     }
 
     // The subpixel layout has to survive the round trip in both directions: the

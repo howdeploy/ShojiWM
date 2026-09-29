@@ -31,7 +31,7 @@ use smithay::{
     utils::{Logical, Physical, Point, Rectangle, Scale},
     wayland::{
         background_effect::BackgroundEffectSurfaceCachedState,
-        compositor::{RectangleKind, RegionAttributes, with_states},
+        compositor::{RectangleKind, RegionAttributes, SurfaceAttributes, with_states},
         session_lock::LockSurface,
         shell::wlr_layer::Layer as WlrLayer,
         shell::xdg::XdgToplevelSurfaceData,
@@ -212,6 +212,63 @@ pub fn bounding_box_for_rects(
         top,
         right - left,
         bottom - top,
+    ))
+}
+
+/// The global logical bounds that a layer's backdrop `behind` effect covers for
+/// `region` (see [`crate::ssd::EffectRegion`]); `layer_rect` is the layer's global
+/// rect. `None` when the region is empty: there is nothing to draw behind.
+///
+/// Both regions are double-buffered surface state, so they switch on the same
+/// commit as the buffer they describe.
+pub fn layer_effect_region_bounds(
+    layer_surface: &LayerSurface,
+    layer_rect: crate::ssd::LogicalRect,
+    region: crate::ssd::EffectRegion,
+) -> Option<crate::ssd::LogicalRect> {
+    let region = match region {
+        crate::ssd::EffectRegion::Surface => return Some(layer_rect),
+        crate::ssd::EffectRegion::Input => {
+            let input_region = with_states(layer_surface.wl_surface(), |states| {
+                states
+                    .cached_state
+                    .get::<SurfaceAttributes>()
+                    .current()
+                    .input_region
+                    .clone()
+            });
+            // No input region: the surface takes input everywhere.
+            let Some(input_region) = input_region else {
+                return Some(layer_rect);
+            };
+            input_region
+        }
+        crate::ssd::EffectRegion::BlurRegion => with_states(layer_surface.wl_surface(), |states| {
+            states
+                .cached_state
+                .get::<BackgroundEffectSurfaceCachedState>()
+                .current()
+                .blur_region
+                .clone()
+        })?,
+    };
+    region_bounds_within_layer(&region, layer_rect)
+}
+
+fn region_bounds_within_layer(
+    region: &RegionAttributes,
+    layer_rect: crate::ssd::LogicalRect,
+) -> Option<crate::ssd::LogicalRect> {
+    let local = region_rects_within_bounds(
+        region,
+        crate::ssd::LogicalRect::new(0, 0, layer_rect.width, layer_rect.height),
+    );
+    let bounds = bounding_box_for_rects(&local)?;
+    Some(crate::ssd::LogicalRect::new(
+        layer_rect.x + bounds.x,
+        layer_rect.y + bounds.y,
+        bounds.width,
+        bounds.height,
     ))
 }
 
@@ -866,7 +923,7 @@ pub fn clipped_surface_elements(
     let clip = clip.filter(|clip| clip.clips_surface);
 
     let elements = surface_elements(window, renderer, location, output_scale, alpha);
-    if clip.is_none() || std::env::var_os("SHOJI_GAP_BYPASS_CLIP").is_some() {
+    if clip.is_none() || crate::env_flag!("SHOJI_GAP_BYPASS_CLIP") {
         return Ok(elements.into_iter().map(WindowClipElement::Raw).collect());
     }
 
@@ -1052,4 +1109,49 @@ pub fn clipped_popup_elements(
             )
         })
         .collect()
+}
+
+#[cfg(test)]
+mod region_bounds_tests {
+    use super::*;
+
+    fn region(rects: &[(RectangleKind, (i32, i32, i32, i32))]) -> RegionAttributes {
+        RegionAttributes {
+            rects: rects
+                .iter()
+                .map(|(kind, (x, y, w, h))| (*kind, Rectangle::new((*x, *y).into(), (*w, *h).into())))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn region_bounds_cover_the_region_in_global_space() {
+        let layer = crate::ssd::LogicalRect::new(100, 0, 504, 812);
+        // A pill, a collapsed (empty) panel and a shape reaching past the surface.
+        let bounds = region_bounds_within_layer(
+            &region(&[
+                (RectangleKind::Add, (176, 6, 152, 34)),
+                (RectangleKind::Add, (200, 50, 104, 0)),
+                (RectangleKind::Add, (480, 20, 100, 10)),
+            ]),
+            layer,
+        );
+        assert_eq!(bounds, Some(crate::ssd::LogicalRect::new(276, 6, 328, 34)));
+    }
+
+    #[test]
+    fn empty_or_subtracted_region_has_no_bounds() {
+        let layer = crate::ssd::LogicalRect::new(0, 0, 200, 100);
+        assert_eq!(region_bounds_within_layer(&region(&[]), layer), None);
+        assert_eq!(
+            region_bounds_within_layer(
+                &region(&[
+                    (RectangleKind::Add, (10, 10, 20, 20)),
+                    (RectangleKind::Subtract, (0, 0, 200, 100)),
+                ]),
+                layer,
+            ),
+            None
+        );
+    }
 }

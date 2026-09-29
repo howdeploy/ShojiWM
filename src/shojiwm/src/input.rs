@@ -62,11 +62,11 @@ fn compositor_pointer_grab_start_data(
 }
 
 fn layer_focus_debug_enabled() -> bool {
-    std::env::var_os("SHOJI_LAYER_FOCUS_DEBUG").is_some()
+    crate::env_flag!("SHOJI_LAYER_FOCUS_DEBUG")
 }
 
 fn pointer_button_debug_enabled() -> bool {
-    std::env::var_os("SHOJI_POINTER_BUTTON_DEBUG").is_some()
+    crate::env_flag!("SHOJI_POINTER_BUTTON_DEBUG")
 }
 
 const POINTER_TRAILING_EDGE_INSET: f64 = 0.5;
@@ -78,7 +78,7 @@ const POINTER_TRAILING_EDGE_INSET: f64 = 0.5;
 /// `to_i32_floor()` for the corresponding containment rule.
 /// Gate for the pointer input-to-photon latency diagnostic.
 pub fn latency_trace_enabled() -> bool {
-    std::env::var_os("SHOJI_LATENCY_TRACE").is_some()
+    crate::env_flag!("SHOJI_LATENCY_TRACE")
 }
 
 fn constrain_pointer_location_to_outputs(
@@ -1542,7 +1542,7 @@ impl ShojiWM {
                         "pointer button forwarded and flushed"
                     );
                 }
-                if std::env::var_os("SHOJI_RIGHT_CLICK_TRACE").is_some() && button == 273 {
+                if crate::env_flag!("SHOJI_RIGHT_CLICK_TRACE") && button == 273 {
                     debug!(
                         state = ?button_state,
                         pointer_location = ?pointer.current_location(),

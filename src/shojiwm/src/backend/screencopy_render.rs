@@ -45,7 +45,7 @@ pub fn process_screencopy_queue_for_output(
     cursor_elements: &[TtyRenderElements],
 ) {
     timescope::scope!("screencopy queue output");
-    let profile = std::env::var_os("SHOJI_SCREENCOPY_PROFILE").is_some();
+    let profile = crate::env_flag!("SHOJI_SCREENCOPY_PROFILE");
     let entry_at = std::time::Instant::now();
     let mut processed = 0usize;
     let mut waited = 0usize;
@@ -242,7 +242,7 @@ fn render_to_dmabuf(
     elements: &[impl RenderElement<GlesRenderer>],
 ) -> Result<SyncPoint, Box<dyn std::error::Error>> {
     timescope::scope!("screencopy render_to_dmabuf");
-    let profile = std::env::var_os("SHOJI_SCREENCOPY_PROFILE").is_some();
+    let profile = crate::env_flag!("SHOJI_SCREENCOPY_PROFILE");
     let bind_at = std::time::Instant::now();
     let mut target = renderer.bind(&mut dmabuf)?;
     let bind_ms = bind_at.elapsed().as_secs_f64() * 1000.0;

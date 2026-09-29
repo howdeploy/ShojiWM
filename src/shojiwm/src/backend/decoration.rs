@@ -41,31 +41,31 @@ pub enum DecorationSceneError {
 }
 
 fn gap_disable_decoration_clip_enabled() -> bool {
-    std::env::var_os("SHOJI_GAP_DISABLE_DECORATION_CLIP").is_some()
+    crate::env_flag!("SHOJI_GAP_DISABLE_DECORATION_CLIP")
 }
 
 fn gap_disable_border_inner_enabled() -> bool {
-    std::env::var_os("SHOJI_GAP_DISABLE_BORDER_INNER").is_some()
+    crate::env_flag!("SHOJI_GAP_DISABLE_BORDER_INNER")
 }
 
 fn gap_disable_titlebar_clip_enabled(height: i32) -> bool {
-    std::env::var_os("SHOJI_GAP_DISABLE_TITLEBAR_CLIP").is_some() && height == 30
+    crate::env_flag!("SHOJI_GAP_DISABLE_TITLEBAR_CLIP") && height == 30
 }
 
 fn gap_show_border_inner_enabled() -> bool {
-    std::env::var_os("SHOJI_GAP_SHOW_BORDER_INNER").is_some()
+    crate::env_flag!("SHOJI_GAP_SHOW_BORDER_INNER")
 }
 
 fn gap_show_titlebar_clip_enabled(height: i32) -> bool {
-    std::env::var_os("SHOJI_GAP_SHOW_TITLEBAR_CLIP").is_some() && height == 30
+    crate::env_flag!("SHOJI_GAP_SHOW_TITLEBAR_CLIP") && height == 30
 }
 
 fn gap_show_border_shell_enabled() -> bool {
-    std::env::var_os("SHOJI_GAP_SHOW_BORDER_SHELL").is_some()
+    crate::env_flag!("SHOJI_GAP_SHOW_BORDER_SHELL")
 }
 
 fn gap_show_border_shell_only_enabled() -> bool {
-    std::env::var_os("SHOJI_GAP_SHOW_BORDER_SHELL_ONLY").is_some()
+    crate::env_flag!("SHOJI_GAP_SHOW_BORDER_SHELL_ONLY")
 }
 
 fn gap_shrink_border_hole_px() -> f32 {
@@ -1492,7 +1492,7 @@ fn rounded_rect_element(
             0.0
         },
     };
-    if std::env::var_os("SHOJI_GAP_DEBUG").is_some() {
+    if crate::env_flag!("SHOJI_GAP_DEBUG") {
         tracing::info!(
             stable_key = %cached.stable_key,
             source_kind = %cached.source_kind,
@@ -1501,7 +1501,7 @@ fn rounded_rect_element(
         );
     }
     let element = state.element(renderer, spec)?;
-    if std::env::var_os("SHOJI_GAP_DEBUG").is_some() {
+    if crate::env_flag!("SHOJI_GAP_DEBUG") {
         let geometry = smithay::backend::renderer::element::Element::geometry(&element, scale);
         let root_local_rect_precise =
             cached
@@ -1977,7 +1977,7 @@ fn shader_effect_element(
         .shader_cache
         .entry(cached.stable_key.clone())
         .or_default();
-    if std::env::var_os("SHOJI_GAP_DEBUG").is_some() {
+    if crate::env_flag!("SHOJI_GAP_DEBUG") {
         tracing::info!(
             stable_key = %cached.stable_key,
             spec = ?spec,
@@ -1986,7 +1986,7 @@ fn shader_effect_element(
     }
     let debug_clip_rect = spec.clip_rect;
     let element = state.element(renderer, spec)?;
-    if std::env::var_os("SHOJI_GAP_DEBUG").is_some() {
+    if crate::env_flag!("SHOJI_GAP_DEBUG") {
         let geometry = smithay::backend::renderer::element::Element::geometry(&element, scale);
         let root_local_rect_precise =
             cached

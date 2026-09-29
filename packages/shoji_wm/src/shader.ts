@@ -30,6 +30,7 @@ import type {
   EffectInvalidationPolicyHandle,
   EffectOutsets,
   LayerEffectHandle,
+  LayerEffectRegion,
   LayerEffectInputHandle,
   LayerSourceHandle,
   PopupEffectHandle,
@@ -79,6 +80,8 @@ export interface CompileWindowEffectOptions extends CompileEffectOptions {
 export interface CompileLayerEffectOptions extends CompileEffectOptions {
   input: LayerEffectInputHandle;
   outsets?: EffectOutsets;
+  /** See {@link LayerEffectRegion}. / {@link LayerEffectRegion} を参照。 */
+  region?: LayerEffectRegion;
 }
 
 // Base directory for relative asset paths (shaders, images, fonts). Callers
@@ -670,7 +673,7 @@ export function compileEffect(
  *
  * @example Per-window drop shadow / ウィンドウごとのドロップシャドウ
  * ```ts
- * // The handle goes in an assignment slot: behind | behindRootSurface | inFront | replace.
+ * // The handle goes in an assignment slot: behind | behindRootSurface | inFront | replace | replaceSubsurfaces | behindSubsurfaces.
  * COMPOSITOR.effect.window = () => ({
  *   behind: compileWindowEffect({
  *     input: windowSource(),
@@ -705,6 +708,18 @@ export function compileWindowEffect(
  * COMPOSITOR.effect.layer = (layer) =>
  *   layer.namespace.value === "bar" ? { behind: barBlur } : {};
  * ```
+ *
+ * @example Blur only where a large shell surface draws / 大きなシェルサーフェスの描画部分だけをブラー
+ * ```ts
+ * // The surface is fixed-size, but its input mask follows the visible shapes.
+ * // サーフェスは固定サイズだが、入力マスクは見えている形に追従する。
+ * const islandBlur = compileLayerEffect({
+ *   input: backdropSource(),
+ *   region: "input",
+ *   outsets: 16,
+ *   pipeline: [dualKawaseBlur({ passes: 2 })],
+ * });
+ * ```
  */
 export function compileLayerEffect(
   options: CompileLayerEffectOptions,
@@ -713,6 +728,7 @@ export function compileLayerEffect(
     kind: "layer-effect",
     effect: compileEffect(options),
     outsets: options.outsets,
+    region: options.region,
   };
 }
 

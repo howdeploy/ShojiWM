@@ -139,7 +139,7 @@ impl SeatHandler for ShojiWM {
         let client = focused.and_then(|s| dh.get_client(s.id()).ok());
         set_data_device_focus(dh, seat, client.clone());
         set_primary_focus(dh, seat, client);
-        if std::env::var_os("SHOJI_LAYER_FOCUS_DEBUG").is_some() {
+        if crate::env_flag!("SHOJI_LAYER_FOCUS_DEBUG") {
             tracing::debug!(
                 focused_surface = focused.map(|surface| surface.id().protocol_id()),
                 "keyboard focus changed"

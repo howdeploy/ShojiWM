@@ -198,7 +198,7 @@ pub fn capture_snapshot<E: RenderElement<GlesRenderer>>(
             let before = damage.current_commit();
             damage.add(rects.iter().copied());
             let after = damage.current_commit();
-            if std::env::var_os("SHOJI_TRANSFORM_SNAPSHOT_DEBUG").is_some() {
+            if crate::env_flag!("SHOJI_TRANSFORM_SNAPSHOT_DEBUG") {
                 tracing::info!(
                     commit_before = ?before,
                     commit_after = ?after,
@@ -207,7 +207,7 @@ pub fn capture_snapshot<E: RenderElement<GlesRenderer>>(
                     "transform snapshot capture damage added"
                 );
             }
-        } else if std::env::var_os("SHOJI_TRANSFORM_SNAPSHOT_DEBUG").is_some() {
+        } else if crate::env_flag!("SHOJI_TRANSFORM_SNAPSHOT_DEBUG") {
             let commit = snapshot.damage.lock().unwrap().current_commit();
             tracing::info!(
                 commit = ?commit,
@@ -215,7 +215,7 @@ pub fn capture_snapshot<E: RenderElement<GlesRenderer>>(
                 "transform snapshot capture: empty damage rects (no visual change)"
             );
         }
-    } else if std::env::var_os("SHOJI_TRANSFORM_SNAPSHOT_DEBUG").is_some() {
+    } else if crate::env_flag!("SHOJI_TRANSFORM_SNAPSHOT_DEBUG") {
         let commit = snapshot.damage.lock().unwrap().current_commit();
         tracing::info!(
             commit = ?commit,
@@ -276,13 +276,14 @@ pub fn duplicate_snapshot(
 }
 
 pub fn render_element_scene_signature<E: Element>(elements: &[E], scale: Scale<f64>) -> u64 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let mut hasher = crate::backend::signature::SignatureHasher::default();
     elements.len().hash(&mut hasher);
     for element in elements {
-        format!("{:?}", element.id()).hash(&mut hasher);
-        format!("{:?}", element.current_commit()).hash(&mut hasher);
-        format!("{:?}", element.geometry(scale)).hash(&mut hasher);
-        format!("{:?}", element.src()).hash(&mut hasher);
+        element.id().hash(&mut hasher);
+        crate::backend::signature::hash_debug(&mut hasher, &element.current_commit());
+        let geometry = element.geometry(scale);
+        (geometry.loc.x, geometry.loc.y, geometry.size.w, geometry.size.h).hash(&mut hasher);
+        crate::backend::signature::hash_debug(&mut hasher, &element.src());
     }
     hasher.finish()
 }

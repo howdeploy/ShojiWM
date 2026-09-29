@@ -453,7 +453,7 @@ impl ClippedSurfaceElement {
             sampled_pixels,
             projected_pixels,
         );
-        if std::env::var_os("SHOJI_GAP_DEBUG").is_some() {
+        if crate::env_flag!("SHOJI_GAP_DEBUG") {
             tracing::info!(
                 debug_label = ?debug_label,
                 output_origin = ?output_origin,
@@ -493,7 +493,7 @@ impl ClippedSurfaceElement {
         // coordinates as the decoration pass.
         let inner = ClippedSurfaceInner::Mapped(inner);
 
-        if std::env::var_os("SHOJI_GAP_DEBUG").is_some() {
+        if crate::env_flag!("SHOJI_GAP_DEBUG") {
             match &inner {
                 ClippedSurfaceInner::Mapped(mapped) => {
                     tracing::info!(
@@ -733,7 +733,7 @@ impl Element for ClippedSurfaceElement {
             ClippedSurfaceInner::Mapped(inner) => inner.damage_since(scale, commit),
         };
 
-        if std::env::var_os("SHOJI_GAP_DEBUG").is_some() {
+        if crate::env_flag!("SHOJI_GAP_DEBUG") {
             match &self.inner {
                 ClippedSurfaceInner::Mapped(inner) => {
                     tracing::info!(

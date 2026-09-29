@@ -791,12 +791,79 @@ export interface WindowEffectAssignment {
   behindRootSurface?: WindowEffectHandle | null;
   inFront?: WindowEffectHandle | null;
   replace?: WindowEffectHandle | null;
+  /**
+   * Replaces the window's subsurfaces (embedded video, previews, ...) separately
+   * from the rest of the window, over their own bounds, so subsurfaces reaching
+   * outside the window are covered too. `windowSource()` reads the subsurfaces.
+   * While this or `behindSubsurfaces` is set, the window sources of the other
+   * slots leave subsurfaces out.
+   * Use `effect_frame_uv()` in the shader to line a mask up with the window.
+   * TTY backend only.
+   * ウィンドウのサブサーフェス（埋め込み動画・プレビューなど）を、ウィンドウ本体とは
+   * 別に、サブサーフェス自身の範囲で置き換えます。ウィンドウからはみ出した
+   * サブサーフェスにも適用されます。`windowSource()` はサブサーフェスを読みます。
+   * これか `behindSubsurfaces` を設定している間は、他のスロットのウィンドウソースから
+   * サブサーフェスが除かれます。
+   * マスクをウィンドウに揃えるにはシェーダーで `effect_frame_uv()` を使います。
+   * TTY バックエンドのみ。
+   */
+  replaceSubsurfaces?: WindowEffectHandle | null;
+  /**
+   * Drawn behind the window's subsurfaces (e.g. their drop shadow), over their
+   * own bounds plus `outsets`, so subsurfaces outside the window get it too.
+   * `windowSource()` reads the subsurfaces as they are, before
+   * `replaceSubsurfaces`. Subsurfaces are left out of the other slots' window
+   * sources as with `replaceSubsurfaces`. TTY backend only.
+   * ウィンドウのサブサーフェスの背後に描画します（影など）。サブサーフェス自身の範囲
+   * ＋`outsets` で処理するため、ウィンドウからはみ出したサブサーフェスにも適用されます。
+   * `windowSource()` は `replaceSubsurfaces` 適用前のサブサーフェスを読みます。
+   * `replaceSubsurfaces` と同様、他のスロットのウィンドウソースからサブサーフェスが
+   * 除かれます。TTY バックエンドのみ。
+   */
+  behindSubsurfaces?: WindowEffectHandle | null;
 }
+
+/**
+ * The part of a layer surface that a backdrop `behind` effect covers. The effect
+ * captures, runs its pipeline and is re-run only over the bounding box of that
+ * part (plus `outsets`), not over the whole surface. Worth setting when the
+ * surface is much larger than what it draws — a fixed-size shell surface, or a
+ * full-screen one with the bar cut out by an input mask.
+ * - `"surface"` (default): the whole surface.
+ * - `"input"`: the input region (QuickShell's `mask`). A surface without one
+ *   takes input everywhere, so this is then the whole surface.
+ * - `"blur-region"`: the blur region the client asked for through
+ *   ext-background-effect (QuickShell's `BackgroundEffect.blurRegion`). Nothing
+ *   is drawn while the client asks for none.
+ *
+ * Anything drawn outside the region gets no effect, so pad it with `outsets`
+ * where the surface draws past its region (antialiasing, shapes that merge).
+ * The region is part of the same commit as the buffer, so the two never
+ * disagree. Only a backdrop `behind` accepts a region other than `"surface"`.
+ *
+ * レイヤーサーフェスのうち、バックドロップの `behind` エフェクトが覆う部分です。
+ * キャプチャ・パイプライン実行・再計算の判定を、サーフェス全体ではなくその部分の
+ * 外接矩形（＋`outsets`）だけで行います。サーフェスが描画内容よりずっと大きい
+ * とき（固定サイズのシェル、入力マスクでバーだけ切り出した全画面サーフェスなど）
+ * に指定すると軽くなります。
+ * - `"surface"`（既定）: サーフェス全体。
+ * - `"input"`: 入力領域（QuickShell の `mask`）。未設定のサーフェスは全体で入力を
+ *   受けるので、その場合はサーフェス全体になります。
+ * - `"blur-region"`: ext-background-effect でクライアントが要求したブラー領域
+ *   （QuickShell の `BackgroundEffect.blurRegion`）。要求が無い間は何も描きません。
+ *
+ * 領域の外に描かれたものにはエフェクトが掛からないため、領域からはみ出して描く分
+ * （アンチエイリアスや形の融合など）は `outsets` で広げてください。領域はバッファと
+ * 同じ commit で切り替わるため、見た目とずれることはありません。`"surface"` 以外を
+ * 指定できるのはバックドロップの `behind` だけです。
+ */
+export type LayerEffectRegion = "surface" | "input" | "blur-region";
 
 export interface LayerEffectHandle {
   kind: "layer-effect";
   effect: CompiledEffectHandle;
   outsets?: EffectOutsets;
+  region?: LayerEffectRegion;
 }
 
 export interface LayerEffectAssignment {

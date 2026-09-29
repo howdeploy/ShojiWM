@@ -194,7 +194,7 @@ fn synthetic_presented_states_for_window(window: &Window) -> RenderElementStates
 }
 
 fn frame_callback_debug_enabled() -> bool {
-    std::env::var_os("SHOJI_FRAME_CALLBACK_DEBUG").is_some()
+    crate::env_flag!("SHOJI_FRAME_CALLBACK_DEBUG")
 }
 
 fn frame_liveness_debug_enabled() -> bool {
@@ -203,15 +203,15 @@ fn frame_liveness_debug_enabled() -> bool {
 }
 
 fn frame_throttle_debug_enabled() -> bool {
-    std::env::var_os("SHOJI_FRAME_THROTTLE_DEBUG").is_some()
+    crate::env_flag!("SHOJI_FRAME_THROTTLE_DEBUG")
 }
 
 fn scale_notify_debug_enabled() -> bool {
-    std::env::var_os("SHOJI_SCALE_NOTIFY_DEBUG").is_some()
+    crate::env_flag!("SHOJI_SCALE_NOTIFY_DEBUG")
 }
 
 fn fifo_debug_enabled() -> bool {
-    std::env::var_os("SHOJI_FIFO_DEBUG").is_some()
+    crate::env_flag!("SHOJI_FIFO_DEBUG")
 }
 
 fn mpv_frame_debug_enabled() -> bool {

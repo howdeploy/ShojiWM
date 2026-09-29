@@ -31,6 +31,11 @@ const distanceField = stateTexture("island-distance-v2", {
 
 export const ISLAND_GLASS = compileLayerEffect({
   input: backdropSource(),
+  // The surface is fixed-size and mostly transparent; its input mask follows
+  // the silhouettes, so only that part (plus the smooth-min bulge where shapes
+  // merge, theme.js surfacePad) is captured and processed.
+  region: "input",
+  outsets: 40,
   capturePadding: 64,
   alpha: "preserve",
   // A silhouette change affects an entire rim, not just the damaged pixel.

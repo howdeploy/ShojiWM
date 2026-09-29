@@ -394,7 +394,7 @@ fn clip_debug_enabled() -> bool {
     use std::sync::OnceLock;
 
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var_os("SHOJI_CLIP_DEBUG").is_some())
+    *ENABLED.get_or_init(|| crate::env_flag!("SHOJI_CLIP_DEBUG"))
 }
 
 fn handler_debug_enabled() -> bool {
@@ -8168,8 +8168,8 @@ fn label_preview(text: &str) -> String {
 }
 
 fn gap_debug_layout_enabled() -> bool {
-    std::env::var_os("SHOJI_GAP_LAYOUT_DEBUG").is_some()
-        || std::env::var_os("SHOJI_GAP_DEBUG").is_some()
+    crate::env_flag!("SHOJI_GAP_LAYOUT_DEBUG")
+        || crate::env_flag!("SHOJI_GAP_DEBUG")
 }
 
 fn resolved_rect_right(rect: crate::ssd::ResolvedLogicalRect) -> f32 {

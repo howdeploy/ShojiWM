@@ -63,6 +63,38 @@ COMPOSITOR.effect.popup = (popup) => {
 };
 ```
 
+### レイヤーエフェクトを領域に絞る
+
+レイヤーの `behind` バックドロップは、既定ではレイヤーサーフェス全体を覆います。
+背後のキャプチャもパイプラインもサーフェス全体で行われ、その下のどこかが damage
+されるたびにエフェクトが再実行されます。シェル系のツールキットは、描画内容より
+ずっと大きなサーフェスを使うことがよくあります（アニメーションするピルを囲む
+固定サイズのサーフェスや、入力マスクでバーだけ切り出したモニターごとの全画面
+サーフェスなど）。その場合は重くなるので、`region` で描画している部分だけに
+絞ってください。
+
+```ts
+const BAR_BLUR = compileLayerEffect({
+  input: backdropSource(),
+  region: 'input', // 入力領域（QuickShell の `mask` など）
+  outsets: 16,     // 領域からはみ出して描く分（アンチエイリアス、形の融合）
+  alpha: 'preserve',
+  pipeline: [dualKawaseBlur({radius: 4, passes: 2})],
+});
+```
+
+| `region` | 覆う範囲 |
+|---|---|
+| `'surface'`（既定） | サーフェス全体。 |
+| `'input'` | 入力領域（`wl_surface.set_input_region`）の外接矩形。未設定のサーフェスは全体で入力を受けるので、その場合はサーフェス全体になります。 |
+| `'blur-region'` | ext-background-effect でクライアントが要求したブラー領域（QuickShell の `BackgroundEffect.blurRegion`）の外接矩形。要求が無い間は何も描きません。 |
+
+キャプチャ・パイプライン・`layerSource()`・damage による無効化のすべてが、この
+領域（＋`outsets`）に従います。どちらの領域もバッファと同じ commit で切り替わるため、
+アニメーションする形に対してエフェクトが 1 フレーム遅れることはありません。
+領域の外に描かれたものにはバックドロップが掛かりません。`'surface'` 以外を指定
+できるのはバックドロップの `behind` だけです。
+
 ## エフェクトを組み立てる
 
 エフェクトは **ソース入力＋ステージのパイプライン**です。使う場所に応じたコンパイル
@@ -103,6 +135,45 @@ COMPOSITOR.effect.popup = (popup) => {
 `windowSource`、`layerSource`、`popupSource`には
 `{include: 'full' | 'root-surface'}`を指定できます。デフォルトは`'full'`です。
 
+TTY バックエンドでは、full のウィンドウソースはルートサーフェス、サブサーフェス、
+サーバーサイドデコレーションを含みます。full ソースの置き換えはその画像全体に適用され、
+サブサーフェスがその上に二重に描かれることはありません。ポップアップは引き続き独立して
+合成されます。root-surface ソースは従来どおりサブサーフェスを含みません。
+
+### サブサーフェス
+
+サブサーフェス（埋め込み動画、プレビュー、一部のブラウザの内容など）はウィンドウの外へ
+はみ出すことがあり、その部分は full のウィンドウソースではカバーできません。ウィンドウ
+専用の 2 つのスロットは、サブサーフェスを本体とは別に、サブサーフェス自身の範囲で
+扱います。`replaceSubsurfaces` は置き換え、`behindSubsurfaces` はその背後に（`outsets`
+も含めて）描画します（影など）。
+
+```ts
+COMPOSITOR.effect.window = () => ({
+  replace: DISSOLVE,
+  replaceSubsurfaces: DISSOLVE,
+  behind: SHADOW,
+  behindSubsurfaces: SHADOW,
+});
+```
+
+- これらのスロットの `windowSource()` はサブサーフェスを読みます。`behindSubsurfaces`
+  は `replaceSubsurfaces` 適用前のサブサーフェスを読みます。どちらかを設定している間は、
+  他のすべてのスロットのウィンドウソースからサブサーフェスが除かれます（ルート
+  サーフェスとサーバーサイドデコレーションのみ）。
+- `behindSubsurfaces` はサブサーフェスの直後ろに描かれるため、ウィンドウ内のサブ
+  サーフェスではウィンドウの内容の上に重なります。
+- ルートサーフェスより上と下のサブサーフェスは、重なり順を保つため 2 つのグループとして
+  処理されます。`replace` が無いとき下側のグループはクライアントとデコレーションの間に、
+  `replace` があるときはその置き換え結果の下に描かれます。
+- テクスチャはウィンドウではなくサブサーフェスを覆います。マスクをウィンドウに揃えるには
+  `effect_frame_uv(effect)`（[`shader_main` の約束ごと](#shader_main-の約束ごと)を参照）で計算
+  してください。同じシェーダーを使えば、両スロットにまたがって 1 枚につながったマスクに
+  なります（ウィンドウ用とサブサーフェス用のスロットの間で共通）。
+- エフェクトが失敗したときは、サブサーフェスをそのまま描画します。
+- TTY バックエンドのみ。閉じるアニメーションはクライアント領域の凍結スナップショットから
+  描画されるため、これらのスロットは使われません。
+
 ### ステージ
 
 | ステージ | 目的 |
@@ -124,8 +195,8 @@ COMPOSITOR.effect.popup = (popup) => {
 ハンドル）を取ります。
 
 uniform値には数値または2／3／4成分の配列を指定でき、各成分をsignalにできます。
-`tex`、`effect_texture_size_px`、`effect_content_rect_px`はコンポジターが使用する予約
-bindingなので、独自のuniform名やtexture名には使えません。
+`tex`、`effect_texture_size_px`、`effect_content_rect_px`、`effect_frame_rect_px`は
+コンポジターが使用する予約bindingなので、独自のuniform名やtexture名には使えません。
 
 ```ts
 import {compileEffect, backdropSource, dualKawaseBlur, shaderStage, loadShader} from 'shoji_wm';
@@ -347,6 +418,7 @@ struct EffectContext {
     vec2 texture_uv;       // 作業テクスチャ全体の正規化座標
     vec2 texture_size_px;  // 作業テクスチャ全体の物理ピクセルサイズ
     vec4 content_rect_px;  // 可視内容の x, y, width, height
+    vec4 frame_rect_px;    // エフェクトが属するウィンドウの矩形
 };
 ```
 
@@ -357,6 +429,7 @@ struct EffectContext {
 | `effect.texture_uv` | `vec2` | キャプチャパディングを含むテクスチャ全体の正規化座標 |
 | `effect.texture_size_px` | `vec2` | 作業テクスチャ全体の物理ピクセルサイズ |
 | `effect.content_rect_px` | `vec4` | テクスチャ内の可視内容を `(x, y, width, height)` で表した矩形 |
+| `effect.frame_rect_px` | `vec4` | ウィンドウエフェクトでは、テクスチャ内のウィンドウ自身の矩形（`outsets` を含まない）。テクスチャが別の範囲を覆う場合（`replaceSubsurfaces`）も同じ。それ以外では可視内容の矩形 |
 | `tex` | `sampler2D` | このステージの入力。`texture2D(tex, effect.texture_uv)` でサンプリング |
 
 すべての`*_px`値は物理ピクセルです。さらに次のヘルパーを利用できます。
@@ -367,6 +440,8 @@ struct EffectContext {
 | `effect_content_px(effect)` | 可視内容の左上を原点とした現在のフラグメント位置 |
 | `effect_content_uv(effect)` | 可視内容上で`0.0`〜`1.0`、パディング部分では範囲外となる正規化座標 |
 | `effect_texture_uv_from_content_px(effect, px)` | 可視内容基準の物理ピクセルをサンプリング用texture UVへ変換 |
+| `effect_frame_px(effect)` | フレームの左上を原点とした現在のフラグメント位置 |
+| `effect_frame_uv(effect)` | フレーム基準の正規化座標。ウィンドウ上で`0.0`〜`1.0`、その外では範囲外 |
 
 サンプリングにはtexture UV、可視矩形に結び付く形状計算にはcontent座標を使ってください。
 作業テクスチャではキャプチャパディングが可視内容より前に置かれるため、content rectの

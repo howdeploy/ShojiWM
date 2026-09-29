@@ -198,7 +198,7 @@ where
         _display: &DisplayHandle,
         data_init: &mut DataInit<'_, D>,
     ) {
-        if std::env::var_os("SHOJI_SCREENCOPY_PROFILE").is_some()
+        if crate::env_flag!("SHOJI_SCREENCOPY_PROFILE")
             && matches!(
                 request,
                 zwlr_screencopy_manager_v1::Request::CaptureOutput { .. }
@@ -355,8 +355,8 @@ where
 }
 
 fn screencopy_dmabuf_advertising_enabled() -> bool {
-    if std::env::var_os("SHOJI_SCREENCOPY_NO_DMABUF").is_some()
-        || std::env::var_os("SHOJI_SCREENCAST_NO_DMABUF").is_some()
+    if crate::env_flag!("SHOJI_SCREENCOPY_NO_DMABUF")
+        || crate::env_flag!("SHOJI_SCREENCAST_NO_DMABUF")
     {
         return false;
     }
@@ -463,7 +463,7 @@ where
             _ => unreachable!(),
         };
 
-        if std::env::var_os("SHOJI_SCREENCOPY_PROFILE").is_some() {
+        if crate::env_flag!("SHOJI_SCREENCOPY_PROFILE") {
             tracing::info!(with_damage, "screencopy: copy request received from client");
         }
 

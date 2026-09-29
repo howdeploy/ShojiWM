@@ -36,7 +36,7 @@ use std::{
 use tracing::{debug, info, trace};
 
 fn commit_rate_debug_enabled() -> bool {
-    std::env::var_os("SHOJI_COMMIT_RATE_DEBUG").is_some()
+    crate::env_flag!("SHOJI_COMMIT_RATE_DEBUG")
 }
 
 fn mpv_frame_debug_enabled() -> bool {
@@ -573,6 +573,13 @@ impl CompositorHandler for ShojiWM {
                 }
         }
         snap_committed_viewport_sources(surface);
+        // `on_commit_buffer_handler` drains the damage, so a layer surface's is read
+        // here and handed to `layer_shell::handle_commit` below.
+        let layer_commit_damage = if pending_source_damage.is_none() {
+            layer_shell::committed_layer_damage(surface)
+        } else {
+            layer_shell::LayerCommitDamage::Whole
+        };
         on_commit_buffer_handler::<Self>(surface);
         if let Some((window, source_damage)) = pending_source_damage {
             self.window_scene_generation = self.window_scene_generation.wrapping_add(1);
@@ -634,7 +641,7 @@ impl CompositorHandler for ShojiWM {
                 );
             }
             let commit_time = std::time::Duration::from(self.clock.now());
-            if std::env::var_os("SHOJI_TRANSFORM_SNAPSHOT_DEBUG").is_some() {
+            if crate::env_flag!("SHOJI_TRANSFORM_SNAPSHOT_DEBUG") {
                 let previous_commit_time =
                     previous_transform_snapshot_source_damage_time(&snapshot.id, commit_time);
                 let delta_ms = previous_commit_time
@@ -723,7 +730,7 @@ impl CompositorHandler for ShojiWM {
         // surfaces without any render element, orphan subsurfaces) deliberately produce no
         // redraw request.
         xdg_shell::handle_commit(self, surface);
-        layer_shell::handle_commit(self, surface);
+        layer_shell::handle_commit(self, surface, layer_commit_damage);
         resize_grab::handle_commit(&mut self.space, surface);
 
         if !self.idle_inhibited_surfaces.is_empty() {

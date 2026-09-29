@@ -330,6 +330,8 @@ enum NativeEffectSlotKind {
     BehindRootSurface,
     InFront,
     Replace,
+    ReplaceSubsurfaces,
+    BehindSubsurfaces,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -2074,6 +2076,8 @@ fn native_effect_slot_kind(value: u32) -> Result<NativeEffectSlotKind, std::io::
         2 => Ok(NativeEffectSlotKind::BehindRootSurface),
         3 => Ok(NativeEffectSlotKind::InFront),
         4 => Ok(NativeEffectSlotKind::Replace),
+        5 => Ok(NativeEffectSlotKind::ReplaceSubsurfaces),
+        6 => Ok(NativeEffectSlotKind::BehindSubsurfaces),
         _ => Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             "unknown native effect slot kind",
@@ -2531,6 +2535,8 @@ fn effect_for_window_slot_mut(
         NativeEffectSlotKind::BehindRootSurface => effects.behind_root_surface.as_mut(),
         NativeEffectSlotKind::InFront => effects.in_front.as_mut(),
         NativeEffectSlotKind::Replace => effects.replace.as_mut(),
+        NativeEffectSlotKind::ReplaceSubsurfaces => effects.replace_subsurfaces.as_mut(),
+        NativeEffectSlotKind::BehindSubsurfaces => effects.behind_subsurfaces.as_mut(),
         NativeEffectSlotKind::Background => {
             return Err("window effect patch has a background effect slot".to_owned());
         }

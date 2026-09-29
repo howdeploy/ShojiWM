@@ -4821,6 +4821,8 @@ const NATIVE_EFFECT_SLOT_BEHIND = 1;
 const NATIVE_EFFECT_SLOT_BEHIND_ROOT_SURFACE = 2;
 const NATIVE_EFFECT_SLOT_IN_FRONT = 3;
 const NATIVE_EFFECT_SLOT_REPLACE = 4;
+const NATIVE_EFFECT_SLOT_REPLACE_SUBSURFACES = 5;
+const NATIVE_EFFECT_SLOT_BEHIND_SUBSURFACES = 6;
 
 interface NativeEffectTarget {
   targetKind: number;
@@ -5046,6 +5048,8 @@ function collectNativeEffectUniformBindings(
     ["behindRootSurface", NATIVE_EFFECT_SLOT_BEHIND_ROOT_SURFACE],
     ["inFront", NATIVE_EFFECT_SLOT_IN_FRONT],
     ["replace", NATIVE_EFFECT_SLOT_REPLACE],
+    ["replaceSubsurfaces", NATIVE_EFFECT_SLOT_REPLACE_SUBSURFACES],
+    ["behindSubsurfaces", NATIVE_EFFECT_SLOT_BEHIND_SUBSURFACES],
   ];
   for (const [name, effectSlot] of slots) {
     const handle = value[name];

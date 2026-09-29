@@ -1363,6 +1363,7 @@ struct MultiTextureStageProgram {
     uniform_tex: ffi::types::GLint,
     uniform_texture_size: ffi::types::GLint,
     uniform_content_rect: ffi::types::GLint,
+    uniform_frame_rect: ffi::types::GLint,
     texture_uniforms: Vec<(String, ffi::types::GLint)>,
     value_uniforms: Vec<(String, ffi::types::GLint)>,
     attrib_vert: ffi::types::GLint,
@@ -1418,6 +1419,9 @@ struct EffectExecutionContext {
     size: (i32, i32),
     state_base_size: (i32, i32),
     content_rect: Rectangle<i32, Buffer>,
+    /// The frame the effect belongs to (a window's own rect) in the working texture; the
+    /// content rect unless the caller knows better.
+    frame_rect: Rectangle<i32, Buffer>,
     named: HashMap<String, GlesTexture>,
     source_signatures: EffectSourceSignatures,
 }
@@ -1744,7 +1748,7 @@ impl RenderElement<GlesRenderer> for StableBackdropFramebufferElement {
             sample_src.size.h as f32 / full_size.h.max(1) as f32,
         ];
 
-        if std::env::var_os("SHOJI_GAP_DEBUG").is_some() {
+        if crate::env_flag!("SHOJI_GAP_DEBUG") {
             // Rate-limited: these run every frame per backdrop element.
             use std::sync::atomic::{AtomicUsize, Ordering};
             static DRAW_LOG_TICK: AtomicUsize = AtomicUsize::new(0);
@@ -1767,7 +1771,7 @@ impl RenderElement<GlesRenderer> for StableBackdropFramebufferElement {
                     used_rendered = inner.rendered.is_some(),
                     "gap debug framebuffer backdrop display draw"
                 );
-                if std::env::var_os("SHOJI_GAP_TEXTURE_READBACK").is_some() {
+                if crate::env_flag!("SHOJI_GAP_TEXTURE_READBACK") {
                     // Read the right-edge columns of the pipeline output and
                     // the raw capture. If the output's last column matches the
                     // raw capture instead of blurred content, the blur/effect
@@ -2914,6 +2918,10 @@ fn compile_noise_salt_program(
                     smithay::backend::renderer::gles::UniformType::_4f,
                 ),
                 UniformName::new(
+                    "effect_frame_rect_px",
+                    smithay::backend::renderer::gles::UniformType::_4f,
+                ),
+                UniformName::new(
                     "noise_amount",
                     smithay::backend::renderer::gles::UniformType::_1f,
                 ),
@@ -2962,6 +2970,10 @@ vec4 shader_main(EffectContext effect) {
                     "effect_content_rect_px",
                     smithay::backend::renderer::gles::UniformType::_4f,
                 ),
+                UniformName::new(
+                    "effect_frame_rect_px",
+                    smithay::backend::renderer::gles::UniformType::_4f,
+                ),
             ],
         )?;
         renderer
@@ -3006,6 +3018,10 @@ vec4 shader_main(EffectContext effect) {
                 ),
                 UniformName::new(
                     "effect_content_rect_px",
+                    smithay::backend::renderer::gles::UniformType::_4f,
+                ),
+                UniformName::new(
+                    "effect_frame_rect_px",
                     smithay::backend::renderer::gles::UniformType::_4f,
                 ),
             ],
@@ -3111,6 +3127,7 @@ precision highp float;
 uniform sampler2D tex;
 uniform vec2 effect_texture_size_px;
 uniform vec4 effect_content_rect_px;
+uniform vec4 effect_frame_rect_px;
 
 varying vec2 v_coords;
 
@@ -3122,7 +3139,8 @@ void main() {{
     EffectContext effect = make_effect_context(
         v_coords,
         effect_texture_size_px,
-        effect_content_rect_px
+        effect_content_rect_px,
+        effect_frame_rect_px
     );
     gl_FragColor = shader_main(effect);
 }}
@@ -3221,6 +3239,7 @@ fn multi_texture_stage_program(
             uniform_tex: location("tex"),
             uniform_texture_size: location("effect_texture_size_px"),
             uniform_content_rect: location("effect_content_rect_px"),
+            uniform_frame_rect: location("effect_frame_rect_px"),
             texture_uniforms: stage
                 .textures
                 .keys()
@@ -3362,6 +3381,10 @@ fn compile_texture_program(
                 "effect_content_rect_px",
                 smithay::backend::renderer::gles::UniformType::_4f,
             ),
+            UniformName::new(
+                "effect_frame_rect_px",
+                smithay::backend::renderer::gles::UniformType::_4f,
+            ),
         ]
     };
     if let Some(uniforms) = uniforms {
@@ -3495,7 +3518,8 @@ float rounded_rect_alpha(vec2 coords, vec2 rect_size, vec4 radius) {{
 
 void main() {{
     vec2 coords = v_coords * size;
-    EffectContext effect = make_effect_context(v_coords, size, vec4(0.0, 0.0, size));
+    EffectContext effect =
+        make_effect_context(v_coords, size, vec4(0.0, 0.0, size), vec4(0.0, 0.0, size));
     vec4 color = shader_main(effect);
     color.a *= alpha;
     color.rgb *= color.a;
@@ -3570,6 +3594,7 @@ void main() {{
     EffectContext effect = make_effect_context(
         v_coords,
         rect_size,
+        vec4(0.0, 0.0, rect_size),
         vec4(0.0, 0.0, rect_size)
     );
     vec4 color = shader_main(effect);
@@ -3610,14 +3635,16 @@ struct EffectContext {
     vec2 texture_uv;
     vec2 texture_size_px;
     vec4 content_rect_px;
+    vec4 frame_rect_px;
 };
 
 EffectContext make_effect_context(
     vec2 texture_uv,
     vec2 texture_size_px,
-    vec4 content_rect_px
+    vec4 content_rect_px,
+    vec4 frame_rect_px
 ) {
-    return EffectContext(texture_uv, texture_size_px, content_rect_px);
+    return EffectContext(texture_uv, texture_size_px, content_rect_px, frame_rect_px);
 }
 
 vec2 effect_texture_px(EffectContext effect) {
@@ -3635,6 +3662,14 @@ vec2 effect_content_uv(EffectContext effect) {
 vec2 effect_texture_uv_from_content_px(EffectContext effect, vec2 content_px) {
     return (effect.content_rect_px.xy + content_px) /
         max(effect.texture_size_px, vec2(1.0));
+}
+
+vec2 effect_frame_px(EffectContext effect) {
+    return effect_texture_px(effect) - effect.frame_rect_px.xy;
+}
+
+vec2 effect_frame_uv(EffectContext effect) {
+    return effect_frame_px(effect) / max(effect.frame_rect_px.zw, vec2(1.0));
 }
 "#
 }
@@ -3660,6 +3695,7 @@ uniform sampler2D tex;
 
 uniform vec2 effect_texture_size_px;
 uniform vec4 effect_content_rect_px;
+uniform vec4 effect_frame_rect_px;
 
 varying vec2 v_coords;
 
@@ -3671,7 +3707,8 @@ void main() {{
     EffectContext effect = make_effect_context(
         v_coords,
         effect_texture_size_px,
-        effect_content_rect_px
+        effect_content_rect_px,
+        effect_frame_rect_px
     );
     gl_FragColor = shader_main(effect);
 }}
@@ -3835,7 +3872,7 @@ pub fn backdrop_shader_element_with_geometry(
         sample_width_px as f32 / captured_width_px.max(1) as f32,
         sample_height_px as f32 / captured_height_px.max(1) as f32,
     ];
-    if std::env::var_os("SHOJI_GAP_DEBUG").is_some() {
+    if crate::env_flag!("SHOJI_GAP_DEBUG") {
         tracing::info!(
             debug_label = %debug_label,
             texture_size = ?texture_size,
@@ -3990,6 +4027,7 @@ fn apply_effect_pipeline_with_cache(
         size,
         state_base_size: size,
         content_rect,
+        frame_rect: content_rect,
         named: HashMap::new(),
         source_signatures: EffectSourceSignatures::default(),
     };
@@ -4021,12 +4059,15 @@ pub fn apply_effect_pipeline_cached_for_key_with_captured_subject(
     size: (i32, i32),
     sample_region: Option<Rectangle<f64, Buffer>>,
     output_size: Option<(i32, i32)>,
+    // The frame (e.g. the whole window) in the working texture; `None` = the content rect.
+    frame_rect: Option<Rectangle<i32, Buffer>>,
     effect: &CompiledEffect,
 ) -> Result<GlesTexture, ShaderEffectError> {
     SHARED_EFFECT_PIPELINE_CACHES.with(|caches| {
         let mut caches = caches.borrow_mut();
         let cache = caches.pipeline(renderer, cache_key);
         timescope::scope!("effect pipeline");
+        let content_rect = effect_content_rect(size, sample_region);
         let mut ctx = EffectExecutionContext {
             backdrop: subject.clone(),
             xray_backdrop: None,
@@ -4034,7 +4075,8 @@ pub fn apply_effect_pipeline_cached_for_key_with_captured_subject(
             popup_source: Some(subject),
             size,
             state_base_size: size,
-            content_rect: effect_content_rect(size, sample_region),
+            content_rect,
+            frame_rect: frame_rect.unwrap_or(content_rect),
             named: HashMap::new(),
             // The captured subject feeds every subject alias, so its signature does too.
             source_signatures: EffectSourceSignatures {
@@ -4081,6 +4123,7 @@ pub fn apply_effect_pipeline_cached_for_key_with_layer_source(
             size,
             state_base_size: size,
             content_rect: effect_content_rect(size, sample_region),
+            frame_rect: effect_content_rect(size, sample_region),
             named: HashMap::new(),
             source_signatures: EffectSourceSignatures {
                 layer: layer_source_signature,
@@ -4148,6 +4191,7 @@ fn apply_effect_pipeline_cached_with_popup_source_and_finish_mode(
         size,
         state_base_size: size,
         content_rect: effect_content_rect(size, sample_region),
+        frame_rect: effect_content_rect(size, sample_region),
         named: HashMap::new(),
         source_signatures: EffectSourceSignatures::default(),
     };
@@ -4572,7 +4616,7 @@ fn run_effect_pipeline_inner(
         sample_region
     };
 
-    if std::env::var_os("SHOJI_GAP_DEBUG").is_some() {
+    if crate::env_flag!("SHOJI_GAP_DEBUG") {
         tracing::info!(
             effect_input = ?effect.input,
             ctx_size = ?ctx.size,
@@ -4587,7 +4631,7 @@ fn run_effect_pipeline_inner(
     // Rate-limit per input size so cheap always-running pipelines (layer
     // bars) do not starve the rarely-invalidated window pipelines out of the
     // dump budget.
-    let stage_readback = std::env::var_os("SHOJI_GAP_STAGE_READBACK").is_some() && {
+    let stage_readback = crate::env_flag!("SHOJI_GAP_STAGE_READBACK") && {
         use std::collections::HashMap;
         use std::sync::Mutex;
         use std::time::{Duration, Instant};
@@ -4623,6 +4667,7 @@ fn run_effect_pipeline_inner(
                 current,
                 current_size,
                 ctx.content_rect,
+                ctx.frame_rect,
                 noise.clone(),
                 cache.as_deref_mut(),
             )?,
@@ -4708,6 +4753,8 @@ fn run_effect_pipeline_inner(
                     .replace(target_format);
                 let previous_size = ctx.size;
                 let previous_content_rect = ctx.content_rect;
+                let previous_frame_rect = ctx.frame_rect;
+                ctx.frame_rect = scale_effect_rect(ctx.frame_rect, ctx.size, state_size);
                 ctx.size = state_size;
                 ctx.content_rect = Rectangle::from_size(state_size.into());
                 let rendered = run_effect_pipeline(
@@ -4725,6 +4772,7 @@ fn run_effect_pipeline_inner(
                     .target_format = previous_target_format;
                 ctx.size = previous_size;
                 ctx.content_rect = previous_content_rect;
+                ctx.frame_rect = previous_frame_rect;
                 let rendered = rendered?;
                 let state_cache = cache
                     .as_deref_mut()
@@ -4772,6 +4820,7 @@ fn run_effect_pipeline_inner(
                 effect_context_uniforms(
                     current_size,
                     effect_content_rect(current_size, Some(region)),
+                    ctx.frame_rect,
                 ),
                 cache.as_deref_mut(),
                 "effect-crop-finish",
@@ -4782,7 +4831,7 @@ fn run_effect_pipeline_inner(
                 current,
                 current_size,
                 program,
-                effect_context_uniforms(current_size, ctx.content_rect),
+                effect_context_uniforms(current_size, ctx.content_rect, ctx.frame_rect),
                 cache,
                 "effect-finish",
             )?;
@@ -4848,6 +4897,27 @@ fn resolve_effect_input(
     align_effect_input_texture(renderer, texture, requested_size, ctx.content_rect)
 }
 
+/// Maps a rect in a `from`-sized working texture into a `to`-sized one covering the same area.
+fn scale_effect_rect(
+    rect: Rectangle<i32, Buffer>,
+    from: (i32, i32),
+    to: (i32, i32),
+) -> Rectangle<i32, Buffer> {
+    let sx = to.0 as f64 / from.0.max(1) as f64;
+    let sy = to.1 as f64 / from.1.max(1) as f64;
+    Rectangle::new(
+        Point::from((
+            (rect.loc.x as f64 * sx).round() as i32,
+            (rect.loc.y as f64 * sy).round() as i32,
+        )),
+        (
+            (rect.size.w as f64 * sx).round().max(1.0) as i32,
+            (rect.size.h as f64 * sy).round().max(1.0) as i32,
+        )
+            .into(),
+    )
+}
+
 fn effect_content_rect(
     size: (i32, i32),
     sample_region: Option<Rectangle<f64, Buffer>>,
@@ -4869,18 +4939,20 @@ fn effect_content_rect(
 fn effect_context_uniforms(
     size: (i32, i32),
     content_rect: Rectangle<i32, Buffer>,
+    frame_rect: Rectangle<i32, Buffer>,
 ) -> Vec<Uniform<'static>> {
+    let rect_uniform = |rect: Rectangle<i32, Buffer>| {
+        [
+            rect.loc.x as f32,
+            rect.loc.y as f32,
+            rect.size.w as f32,
+            rect.size.h as f32,
+        ]
+    };
     vec![
         Uniform::new("effect_texture_size_px", [size.0 as f32, size.1 as f32]),
-        Uniform::new(
-            "effect_content_rect_px",
-            [
-                content_rect.loc.x as f32,
-                content_rect.loc.y as f32,
-                content_rect.size.w as f32,
-                content_rect.size.h as f32,
-            ],
-        ),
+        Uniform::new("effect_content_rect_px", rect_uniform(content_rect)),
+        Uniform::new("effect_frame_rect_px", rect_uniform(frame_rect)),
     ]
 }
 
@@ -5006,23 +5078,13 @@ fn apply_texture_shader_stage(
             textures,
             size,
             ctx.content_rect,
+            ctx.frame_rect,
             stage,
             cache,
         );
     }
     let program = compile_texture_stage_program(renderer, stage)?;
-    let mut uniforms = vec![
-        Uniform::new("effect_texture_size_px", [size.0 as f32, size.1 as f32]),
-        Uniform::new(
-            "effect_content_rect_px",
-            [
-                ctx.content_rect.loc.x as f32,
-                ctx.content_rect.loc.y as f32,
-                ctx.content_rect.size.w as f32,
-                ctx.content_rect.size.h as f32,
-            ],
-        ),
-    ];
+    let mut uniforms = effect_context_uniforms(size, ctx.content_rect, ctx.frame_rect);
     for (name, value) in &stage.uniforms {
         append_shader_uniform_values(&mut uniforms, name, value);
     }
@@ -5043,6 +5105,7 @@ fn apply_multi_texture_shader_stage(
     textures: Vec<(String, GlesTexture)>,
     size: (i32, i32),
     content_rect: Rectangle<i32, Buffer>,
+    frame_rect: Rectangle<i32, Buffer>,
     stage: &ShaderStage,
     cache: Option<&mut EffectPipelineCache>,
 ) -> Result<GlesTexture, ShaderEffectError> {
@@ -5076,6 +5139,13 @@ fn apply_multi_texture_shader_stage(
                 content_rect.loc.y as f32,
                 content_rect.size.w as f32,
                 content_rect.size.h as f32,
+            );
+            gl.Uniform4f(
+                program.uniform_frame_rect,
+                frame_rect.loc.x as f32,
+                frame_rect.loc.y as f32,
+                frame_rect.size.w as f32,
+                frame_rect.size.h as f32,
             );
 
             for (index, ((_, location), (_, texture))) in program
@@ -5204,6 +5274,7 @@ fn apply_noise_stage(
     texture: GlesTexture,
     size: (i32, i32),
     content_rect: Rectangle<i32, Buffer>,
+    frame_rect: Rectangle<i32, Buffer>,
     noise: NoiseStage,
     cache: Option<&mut EffectPipelineCache>,
 ) -> Result<GlesTexture, ShaderEffectError> {
@@ -5216,7 +5287,7 @@ fn apply_noise_stage(
                 size,
                 program,
                 {
-                    let mut uniforms = effect_context_uniforms(size, content_rect);
+                    let mut uniforms = effect_context_uniforms(size, content_rect, frame_rect);
                     uniforms.push(Uniform::new("noise_amount", noise.amount));
                     uniforms
                 },
@@ -5676,7 +5747,7 @@ fn preblur_using_pyramid(
 ) -> Result<GlesTexture, ShaderEffectError> {
     prepare_blur_pyramid(renderer, pyramid, source_size, passes)?;
 
-    let stage_readback = std::env::var_os("SHOJI_GAP_STAGE_READBACK").is_some() && {
+    let stage_readback = crate::env_flag!("SHOJI_GAP_STAGE_READBACK") && {
         use std::sync::atomic::{AtomicUsize, Ordering};
         static TICK: AtomicUsize = AtomicUsize::new(0);
         TICK.fetch_add(1, Ordering::Relaxed).is_multiple_of(600)
@@ -6024,6 +6095,7 @@ mod multi_texture_program_tests {
             uniform_tex: -1,
             uniform_texture_size: -1,
             uniform_content_rect: -1,
+            uniform_frame_rect: -1,
             texture_uniforms: Vec::new(),
             value_uniforms: Vec::new(),
             attrib_vert: -1,
@@ -6235,5 +6307,96 @@ mod effect_error_tests {
         ));
         assert!(STAND_IN_SHADER_USED.with(Cell::get));
         FAILED_SHADERS.with(|failed| failed.borrow_mut().clear());
+    }
+}
+
+#[cfg(test)]
+mod frame_rect_tests {
+    use super::*;
+    use crate::ssd::{EffectAlphaMode, EffectInvalidationPolicy, WindowSourceInclude};
+    use smithay::backend::renderer::ExportMem;
+
+    fn try_renderer() -> Option<GlesRenderer> {
+        let gbm = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/dri/renderD128")
+            .ok()
+            .and_then(|fd| smithay::backend::allocator::gbm::GbmDevice::new(fd).ok())?;
+        let egl = unsafe { smithay::backend::egl::EGLDisplay::new(gbm).ok()? };
+        let context = smithay::backend::egl::EGLContext::new(&egl).ok()?;
+        unsafe { GlesRenderer::new(context).ok() }
+    }
+
+    /// A shader stage sees the frame it belongs to, independently of its own texture: a
+    /// subsurface effect captured over other bounds still lines up with its window.
+    #[test]
+    fn shader_stages_see_the_frame_rect() {
+        let Some(mut renderer) = try_renderer() else {
+            eprintln!("skipping: no render node");
+            return;
+        };
+        let shader_path = std::env::temp_dir().join(format!(
+            "shojiwm-frame-rect-test-{}.frag",
+            std::process::id()
+        ));
+        std::fs::write(
+            &shader_path,
+            "vec4 shader_main(EffectContext effect) {\n\
+             \x20   return vec4(effect_frame_uv(effect), 0.0, 1.0);\n\
+             }\n",
+        )
+        .unwrap();
+        let effect = CompiledEffect {
+            input: EffectInput::WindowSource(WindowSourceInclude::Full),
+            capture_padding: 0,
+            invalidate: EffectInvalidationPolicy::Always,
+            pipeline: vec![EffectStage::Shader(ShaderStage {
+                shader: ShaderModule {
+                    path: shader_path.to_string_lossy().into_owned(),
+                },
+                uniforms: Default::default(),
+                textures: Default::default(),
+            })],
+            alpha: EffectAlphaMode::Preserve,
+        };
+        let size = (100, 50);
+        let subject: GlesTexture = renderer
+            .create_buffer(Fourcc::Abgr8888, size.into())
+            .unwrap();
+        let frame = Rectangle::<i32, Buffer>::new((20, 10).into(), (40, 20).into());
+        let texture = apply_effect_pipeline_cached_for_key_with_captured_subject(
+            &mut renderer,
+            "frame-rect-test".into(),
+            subject,
+            None,
+            size,
+            None,
+            Some(size),
+            Some(frame),
+            &effect,
+        );
+        let _ = std::fs::remove_file(&shader_path);
+        let texture = texture.unwrap();
+
+        let mapping = renderer
+            .copy_texture(&texture, Rectangle::from_size(size.into()), Fourcc::Abgr8888)
+            .unwrap();
+        let bytes = renderer.map_texture(&mapping).unwrap().to_vec();
+        let pixel = |x: i32, y: i32| {
+            let offset = ((y * size.0 + x) * 4) as usize;
+            (bytes[offset] as f32 / 255.0, bytes[offset + 1] as f32 / 255.0)
+        };
+        let close = |value: f32, expected: f32| (value - expected).abs() < 0.04;
+        // Pixel centres: frame-relative (x + 0.5) / 40, (y + 0.5) / 20.
+        let (u, v) = pixel(40, 20);
+        assert!(close(u, 20.5 / 40.0) && close(v, 10.5 / 20.0), "frame centre: {u} {v}");
+        let (u, v) = pixel(20, 10);
+        assert!(close(u, 0.5 / 40.0) && close(v, 0.5 / 20.0), "frame origin: {u} {v}");
+        // Outside the frame the coordinates keep going (clamped by the 8-bit target).
+        let (u, _) = pixel(5, 20);
+        assert!(close(u, 0.0), "left of the frame: {u}");
+        let (u, _) = pixel(90, 20);
+        assert!(close(u, 1.0), "right of the frame: {u}");
     }
 }

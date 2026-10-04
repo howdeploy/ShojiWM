@@ -4901,6 +4901,50 @@ COMPOSITOR.window.composition = () => <Box />;
     }
 
     #[test]
+    fn embedded_runtime_output_overlay_rejects_blocking_callbacks_and_times_out_detached_capture() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().unwrap();
+        let dir = root.join("target").join(format!("overlay-runtime-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = dir.join("config.tsx");
+        std::fs::write(&config, r#"
+import { Box, COMPOSITOR, compileOverlayEffect, snapshotSource, noise } from "shoji_wm";
+const errors = [];
+const options = { effect: compileOverlayEffect({input: snapshotSource(), pipeline: [noise({amount: 0})]}), maxDuration: 20 };
+try { await COMPOSITOR.effect.overlay("overlay-runtime-test", options); }
+catch (error) { errors.push(error.message); }
+COMPOSITOR.window.composition = () => <Box />;
+COMPOSITOR.event.onPointerMoveAsync(async () => {
+  try { await COMPOSITOR.effect.overlay("overlay-runtime-test", options); }
+  catch (error) { errors.push(error.message); }
+  void COMPOSITOR.effect.overlay("overlay-runtime-test", options).catch(error => errors.push(error.message));
+});
+COMPOSITOR.onDisable(event => event.persist("errors", errors));
+"#).unwrap();
+        let evaluator = EmbeddedDecorationEvaluator::for_paths(root.join("tools/decoration-runtime.ts"), &config)
+            .with_working_dir(&root);
+        evaluator.lifecycle_enable("initial", None).unwrap();
+        let pointer = crate::ssd::PointerMoveEventSnapshot {
+            position: crate::ssd::PointerMovePointSnapshot { x: 1.0, y: 2.0 },
+            delta: crate::ssd::PointerMovePointSnapshot { x: 0.0, y: 0.0 },
+            target: crate::ssd::PointerHitTargetSnapshot::None,
+            output_name: Some("overlay-runtime-test".into()),
+            modifiers: crate::ssd::PointerModifierStateSnapshot { logo: false, alt: false, ctrl: false, shift: false },
+            timestamp: 1,
+        };
+        assert!(evaluator.dispatch_pointer_move_async(&pointer, 1).unwrap().is_some());
+        // No render loop: the native runtime must enforce the capture deadline itself.
+        std::thread::sleep(Duration::from_millis(150));
+        let saved = evaluator.lifecycle_disable("test").unwrap();
+        let errors = saved["errors"].as_array().unwrap();
+        assert_eq!(errors.len(), 3, "all failure paths must settle: {saved:?}");
+        assert!(errors[0].as_str().unwrap().contains("initialization"), "{saved:?}");
+        assert!(errors[1].as_str().unwrap().contains("detached task"), "{saved:?}");
+        assert!(errors[2].as_str().unwrap().contains("timed out"), "{saved:?}");
+        drop(evaluator);
+        crate::backend::overlay::OutputOverlays::default().tick(&[], false);
+    }
+
+    #[test]
     fn embedded_runtime_workspace_transition_without_layer() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
         let dir = std::env::temp_dir().join(format!("shoji-workspace-wave-{}", std::process::id()));
@@ -5263,6 +5307,12 @@ COMPOSITOR.rendering.surfacePolicy = () => ({ opaqueRegion: "ignore" });
         evaluator
             .preload()
             .expect("embedded runtime should preload the default config");
+        // Both configs start a default IPC server. They must coexist without
+        // sharing a socket with each other or with the user's desktop session.
+        let second = real_config_evaluator();
+        second.preload().expect("each test runtime needs its own IPC directory");
+        evaluator.lifecycle_enable("test", None).unwrap();
+        second.lifecycle_enable("test", None).unwrap();
     }
 
     fn make_named_window(
@@ -7229,6 +7279,10 @@ import {{ Box, COMPOSITOR }} from "shoji_wm";
 import {{ createIpcServer }} from "shoji_wm/ipc";
 
 const ipc = createIpcServer({socket_literal});
+let duplicateRejected = false;
+try {{ createIpcServer({socket_literal}); }}
+catch {{ duplicateRejected = true; }}
+if (!duplicateRejected) throw new Error("A second server replaced the live IPC socket");
 ipc.handle("ping", () => "pong");
 COMPOSITOR.onDisable(() => ipc.close());
 COMPOSITOR.window.composition = () => <Box />;

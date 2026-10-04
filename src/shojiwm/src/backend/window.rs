@@ -276,9 +276,11 @@ pub fn layer_surfaces_for_output(
     output: &smithay::output::Output,
 ) -> (Vec<LayerSurface>, Vec<LayerSurface>) {
     let map = layer_map_for_output(output);
-    let (lower, upper): (Vec<LayerSurface>, Vec<LayerSurface>) = map
-        .layers()
-        .rev()
+    // LayerMap keeps insertion order: a late Background must stay below Bottom widgets.
+    let ordered = [WlrLayer::Overlay, WlrLayer::Top, WlrLayer::Bottom, WlrLayer::Background];
+    let (lower, upper): (Vec<LayerSurface>, Vec<LayerSurface>) = ordered
+        .iter()
+        .flat_map(|layer| map.layers_on(*layer).rev())
         .filter(|surface| layer_surface_is_mapped(surface))
         .cloned()
         .partition(|surface| matches!(surface.layer(), WlrLayer::Background | WlrLayer::Bottom));

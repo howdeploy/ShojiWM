@@ -220,6 +220,10 @@ import {
   isSignal as isReadonlySignal,
 } from "./signals";
 import { resolveAssetPath } from "./shader";
+import { overlay } from "./overlay";
+export type { CompositorEffectController } from "./types";
+export { compileOverlayEffect, snapshotSource, installOverlayBridge } from "./overlay";
+export type { OverlayOptions, OverlayHandle, OverlayEffectHandle, SnapshotSourceHandle } from "./overlay";
 import { serializeCompositionTree } from "./serialize";
 export {
   advanceAnimationFrame,
@@ -904,6 +908,7 @@ const PRELOAD_CONTROLLER: PreloadController = {};
  * ```
  */
 function createCompositorDefinition(): CompositorDefinition {
+  let effects = { background_effect: null, overlay } as import("./types").CompositorEffectController;
   return {
     event: createCompositorEventController(),
     onEnable(listener) {
@@ -913,8 +918,11 @@ function createCompositorDefinition(): CompositorDefinition {
       return this.event.onDisable(listener);
     },
     preload: PRELOAD_CONTROLLER,
-    effect: {
-      background_effect: null,
+    get effect(): import("./types").CompositorEffectController {
+      return effects;
+    },
+    set effect(value: CompositorEffectConfig) {
+      effects = { ...value, overlay };
     },
     rendering: {},
     output: OUTPUT_CONTROLLER,

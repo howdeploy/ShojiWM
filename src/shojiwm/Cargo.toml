@@ -76,7 +76,7 @@ deno_core = "=0.380.1"
 # net/io-util/macros are for the IPC socket ops. They only resolved before
 # because deno_core unifies tokio to "full"; name them so a dependency bump
 # can't silently remove them.
-tokio = { version = "1.47.1", features = ["sync", "net", "io-util", "macros"] }
+tokio = { version = "1.47.1", features = ["sync", "net", "io-util", "macros", "time"] }
 # V8 142's Temporal implementation requires the ICU 2.1 API. RustyScript's
 # upstream lockfile pins this set, but its published dependency ranges also
 # admit incompatible ICU 2.2 releases.

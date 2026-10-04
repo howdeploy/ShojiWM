@@ -1,0 +1,4 @@
+{
+  "extends": "../tsconfig.json",
+  "include": ["output-overlay-types.ts", "../examples/output-overlay/**/*.ts"]
+}

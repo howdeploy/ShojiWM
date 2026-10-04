@@ -1002,6 +1002,7 @@ pub fn init_winit(
                             upper_layer_backdrop_windows,
                             fullscreen_scanout.is_some(),
                         ));
+                        let mut overlay_below_layers = scene_elements.len();
                         scene_elements.extend(
                             closing_snapshot_elements(renderer, state, &output, scale),
                         );
@@ -1898,6 +1899,7 @@ pub fn init_winit(
                             &mut state.popup_framebuffer_effect_states,
                             configured_background_effect.as_ref(),
                         );
+                        overlay_below_layers += layer_popup_elements.len();
                         layer_popup_elements.append(&mut scene_elements);
                         scene_elements = layer_popup_elements;
 
@@ -1930,7 +1932,13 @@ pub fn init_winit(
                                 .into_iter()
                                 .map(WinitRenderElements::Damage),
                         );
+                        overlay_below_layers += content_elements.len();
                         content_elements.extend(scene_elements);
+                        if !state.session_lock_active {
+                            state.output_overlays.render(renderer, &output,
+                                (output_geo.size.w, output_geo.size.h), scale, &mut content_elements,
+                                overlay_below_layers, WinitRenderElements::Snapshot);
+                        }
 
                         let mut elements: Vec<WinitRenderElements> = Vec::new();
                         let error_text_elements = crate::config_error::text_elements_for_output(
@@ -3434,13 +3442,11 @@ fn lower_layer_scene_elements(
         let Some(effect_rect) = crate::backend::window::bounding_box_for_rects(&rects) else {
             continue;
         };
-        let stable_key = format!(
-            "__layer_background_effect_{}_{}_{}_{}x{}",
-            output.name(),
-            layer_id,
-            index,
+        let stable_key = crate::backend::shader_effect::lower_layer_backdrop_key(
+            &output.name(),
+            &layer_id,
             effect_rect.width,
-            effect_rect.height
+            effect_rect.height,
         );
         let blur_padding = config.effect.capture_padding.max(0);
         let capture_geo = Rectangle::new(
@@ -3462,6 +3468,8 @@ fn lower_layer_scene_elements(
             );
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         stable_key.hash(&mut hasher);
+        // Stack changes invalidate the backdrop, not persistent effect state.
+        index.hash(&mut hasher);
         state.lower_layer_scene_generation.hash(&mut hasher);
         crate::backend::signature::hash_debug(&mut hasher, &config.effect);
         (

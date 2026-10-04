@@ -221,11 +221,15 @@ pub fn purge_shared_effect_pipeline_caches_for_window(window_id: &str) {
     });
 }
 
+pub(crate) fn lower_layer_backdrop_key(output: &str, layer_id: &str, width: i32, height: i32) -> String {
+    format!("__layer_background_effect_{output}_{layer_id}_lower_{width}x{height}")
+}
+
 /// The part of a layer backdrop key that names one layer on one output: every
 /// variant of that layer shares it, whatever its size, stack position or kind.
 ///
-/// Keys are `__layer_background_effect_{output}_{layer_id}_{index|top}_{w}x{h}`.
-/// Neither the position nor the size contains `_`, so they are the last two
+/// Keys are `__layer_background_effect_{output}_{layer_id}_{lower|top}_{w}x{h}`.
+/// Neither the kind nor the size contains `_`, so they are the last two
 /// `_`-separated segments; output names and layer runtime ids contain none
 /// either, so what remains names exactly one layer on one output.
 fn layer_backdrop_variant_prefix(key: &str) -> Option<&str> {
@@ -904,7 +908,7 @@ struct EffectPipelineCache {
 }
 
 #[derive(Debug, Default)]
-struct EffectInstancePipelineCache {
+pub(crate) struct EffectInstancePipelineCache {
     renderer_context_id: Option<ContextId<GlesTexture>>,
     pipeline: EffectPipelineCache,
 }
@@ -1357,6 +1361,30 @@ struct BlurShaderPrograms {
 struct BlurShaderProgramCache(Mutex<Option<BlurShaderPrograms>>);
 #[derive(Debug, Default)]
 struct TextureStageProgramCache(Mutex<HashMap<String, GlesTexProgram>>);
+#[derive(Debug, Default)]
+struct ShaderProgramCacheEpoch(Mutex<u64>);
+
+fn refresh_shader_program_caches(data: &UserDataMap) {
+    data.insert_if_missing(ShaderProgramCacheEpoch::default);
+    let mut applied = data.get::<ShaderProgramCacheEpoch>().unwrap().0.lock().unwrap();
+    let epoch = SHADER_PROGRAM_RELOAD_EPOCH.with(Cell::get);
+    if *applied == epoch {
+        return;
+    }
+    // Each EGL context owns its programs. Evict lazily on that context's next use;
+    // existing draw references keep their programs alive until safe to retire.
+    if let Some(cache) = data.get::<ShaderProgramCache>() {
+        cache.0.lock().unwrap().clear();
+    }
+    if let Some(cache) = data.get::<TextureStageProgramCache>() {
+        cache.0.lock().unwrap().clear();
+    }
+    if let Some(cache) = data.get::<MultiTextureStageProgramCache>() {
+        cache.programs.lock().unwrap().clear();
+    }
+    *applied = epoch;
+}
+
 #[derive(Debug)]
 struct MultiTextureStageProgram {
     program: ffi::types::GLuint,
@@ -1510,6 +1538,8 @@ struct SolidWhiteTextureCache(Mutex<Option<GlesTexture>>);
 
 #[derive(Debug, thiserror::Error)]
 pub enum ShaderEffectError {
+    #[error("output overlay shader failed to compile; see the compositor shader error report")]
+    OverlayShaderFailed,
     #[error("failed to read shader source at {path}: {source}")]
     ReadShader {
         path: String,
@@ -2465,6 +2495,7 @@ struct FailedShader {
 thread_local! {
     /// Pipeline failures seen since the last config reload (deduplicated).
     static REPORTED_EFFECT_ERRORS: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+    static SHADER_PROGRAM_RELOAD_EPOCH: Cell<u64> = const { Cell::new(0) };
     /// Program cache key -> the failed build of that shader. An entry lives as long as the
     /// stand-in is cached under that key, and the overlay text is derived from the entries that
     /// are `confirmed`: fixing the file removes the entry, and with it the message.
@@ -2511,6 +2542,11 @@ pub fn take_effect_error_update() -> Option<Option<String>> {
 /// Forget the pipeline failures seen so far: a config reload may have fixed them, and the ones
 /// that are still there report themselves again on the next frame.
 pub fn reset_effect_error_reports() {
+    // Healthy GLSL needs reloading too, even if its path and uniform layout match.
+    SHADER_PROGRAM_RELOAD_EPOCH.with(|epoch| epoch.set(epoch.get().wrapping_add(1)));
+    SHARED_EFFECT_PIPELINE_CACHES.with(|caches| {
+        *caches.borrow_mut() = SharedEffectPipelineCaches::default();
+    });
     REPORTED_EFFECT_ERRORS.with(|reported| reported.borrow_mut().clear());
     // Shader failures too: the reloaded config may no longer use those shaders at all. The ones
     // it still uses are rebuilt on their next use and confirm themselves again if still broken.
@@ -2667,6 +2703,7 @@ fn compile_shader_program(
     renderer: &mut GlesRenderer,
     shader: &CompiledEffect,
 ) -> Result<GlesPixelProgram, ShaderEffectError> {
+    refresh_shader_program_caches(renderer.egl_context().user_data());
     if renderer
         .egl_context()
         .user_data()
@@ -3153,6 +3190,7 @@ fn multi_texture_stage_program(
     renderer: &mut GlesRenderer,
     stage: &ShaderStage,
 ) -> Result<Arc<MultiTextureStageProgram>, ShaderEffectError> {
+    refresh_shader_program_caches(renderer.egl_context().user_data());
     if renderer
         .egl_context()
         .user_data()
@@ -3286,6 +3324,7 @@ fn compile_texture_program(
     with_clip: bool,
     uniforms: Option<&std::collections::BTreeMap<String, ShaderUniformValue>>,
 ) -> Result<GlesTexProgram, ShaderEffectError> {
+    refresh_shader_program_caches(renderer.egl_context().user_data());
     if renderer
         .egl_context()
         .user_data()
@@ -4004,6 +4043,47 @@ fn apply_effect_pipeline_cached_with_finish_mode(
         Some(cache),
         finish_mode,
     )
+}
+
+pub(crate) fn apply_overlay_effect(
+    renderer: &mut GlesRenderer,
+    snapshot: Option<GlesTexture>,
+    backdrop: Option<GlesTexture>,
+    size: (i32, i32),
+    effect: &CompiledEffect,
+    cache: &mut EffectInstancePipelineCache,
+) -> Result<GlesTexture, ShaderEffectError> {
+    let mut named = HashMap::new();
+    if let Some(snapshot) = snapshot {
+        named.insert(super::overlay::SNAPSHOT_NAME.to_owned(), snapshot);
+    }
+    let backdrop = match backdrop {
+        Some(texture) => texture,
+        None => solid_white_texture(renderer)?,
+    };
+    let rect = Rectangle::from_size(size.into());
+    let mut ctx = EffectExecutionContext {
+        backdrop,
+        xray_backdrop: None,
+        layer_source: None,
+        popup_source: None,
+        size,
+        state_base_size: size,
+        content_rect: rect,
+        frame_rect: rect,
+        named,
+        source_signatures: EffectSourceSignatures::default(),
+    };
+    let cache = cache.begin_frame(renderer);
+    // Window effects intentionally degrade to their unprocessed input. An overlay must
+    // reject instead: a failed transition must never freeze an unchanged screenshot.
+    let old_depth = EFFECT_PIPELINE_DEPTH.with(|depth| depth.replace(1));
+    let old_stand_in = STAND_IN_SHADER_USED.with(|used| used.replace(false));
+    let result = run_effect_pipeline_inner(renderer, effect, &mut ctx, None, Some(size),
+        Some(cache), BackdropFinishMode::Materialize);
+    let failed_shader = STAND_IN_SHADER_USED.with(|used| used.replace(old_stand_in));
+    EFFECT_PIPELINE_DEPTH.with(|depth| depth.set(old_depth));
+    if failed_shader { Err(ShaderEffectError::OverlayShaderFailed) } else { result }
 }
 
 fn apply_effect_pipeline_with_cache(
@@ -5957,6 +6037,24 @@ mod layer_cache_key_tests {
     }
 
     #[test]
+    fn stable_lower_key_keeps_state_and_separates_layers_and_outputs() {
+        let current = lower_layer_backdrop_key("DP-1", ID, 1920, 1080);
+        let pipeline = format!("tty:layer-lower:{current}");
+        assert!(!is_stale_layer_pipeline_variant(&pipeline, &current));
+        assert_eq!(layer_backdrop_variant_prefix(&current),
+            layer_backdrop_variant_prefix(&top("DP-1", ID, "1920x1080")));
+        for key in [
+            lower_layer_backdrop_key("HDMI-A-1", ID, 1920, 1080),
+            lower_layer_backdrop_key("DP-1", "other-layer", 1920, 1080),
+        ] {
+            assert!(!is_stale_layer_pipeline_variant(&format!("tty:layer-lower:{key}"), &current));
+            assert_ne!(layer_backdrop_variant_prefix(&key), layer_backdrop_variant_prefix(&current));
+        }
+        let resized = lower_layer_backdrop_key("DP-1", ID, 1280, 720);
+        assert!(is_stale_layer_pipeline_variant(&format!("tty:layer-lower:{resized}"), &current));
+    }
+
+    #[test]
     fn variant_prefix_names_the_layer_on_its_output() {
         assert_eq!(
             layer_backdrop_variant_prefix(&lower("HDMI-A-3", ID, 1, "3840x2160")),
@@ -6130,6 +6228,30 @@ mod multi_texture_program_tests {
             DELETED_PROGRAMS.with(|deleted| deleted.borrow().clone()),
             vec![7]
         );
+    }
+
+    #[test]
+    fn reload_evicts_healthy_programs_once_per_context() {
+        let contexts = [UserDataMap::default(), UserDataMap::default()];
+        for data in &contexts {
+            refresh_shader_program_caches(data);
+            data.insert_if_missing(MultiTextureStageProgramCache::default);
+            let cache = data.get::<MultiTextureStageProgramCache>().unwrap();
+            cache.programs.lock().unwrap().insert("healthy".into(), program(cache, 7));
+            refresh_shader_program_caches(data);
+            assert_eq!(cache.programs.lock().unwrap().len(), 1);
+        }
+        reset_effect_error_reports();
+        for data in &contexts {
+            let cache = data.get::<MultiTextureStageProgramCache>().unwrap();
+            assert_eq!(cache.programs.lock().unwrap().len(), 1);
+            refresh_shader_program_caches(data);
+            assert!(cache.programs.lock().unwrap().is_empty());
+            assert_eq!(*cache.retired_programs.lock().unwrap(), vec![7]);
+            cache.programs.lock().unwrap().insert("healthy".into(), program(cache, 8));
+            refresh_shader_program_caches(data);
+            assert_eq!(cache.programs.lock().unwrap().len(), 1);
+        }
     }
 
     #[test]

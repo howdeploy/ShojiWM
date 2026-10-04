@@ -11,6 +11,7 @@
 
 mod bridge;
 mod embedded_runtime;
+pub(crate) use embedded_runtime::wake_compositor;
 mod evaluator;
 mod integration;
 mod interaction;

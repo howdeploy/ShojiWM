@@ -260,12 +260,6 @@ export function createIpcServer(
     throw new Error("ShojiWM IPC requires the embedded compositor runtime");
   }
 
-  try {
-    removeUnixSocket(socketPath);
-  } catch {
-    // No stale socket exists.
-  }
-
   const handlers = new Map<string, IpcHandler>();
   const listener = nativeListen(socketPath);
   let closed = false;

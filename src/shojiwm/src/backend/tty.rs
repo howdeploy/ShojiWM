@@ -1091,6 +1091,8 @@ struct SurfaceDmabufFeedback {
 }
 
 pub fn pause_tty_session(state: &mut ShojiWM) {
+    crate::backend::overlay::close_all("Session paused");
+    state.output_overlays.clear();
     for backend in state.tty_backends.values_mut() {
         backend.drm_output_manager.pause();
         for surface in backend.surfaces.values_mut() {
@@ -3746,8 +3748,18 @@ fn render_surface(
             };
 
         let mut scene_elements: Vec<TtyRenderElements> = Vec::new();
+        // Local desktop-pet policy: only the top visible MateEngine client is
+        // lifted above the dock and ordinary closing snapshots. Fullscreen,
+        // pinned windows above it, other upper layers and popups keep priority.
+        let promote_mateengine = fullscreen_window.is_none()
+            && windows_top_to_bottom.iter().find_map(|window| {
+                let decoration = window_decorations.get(window)?;
+                decoration.managed_window_allows_render_on_output(output.name().as_str())
+                    .then_some(decoration.snapshot.app_id.as_deref() == Some("MateEngineX.x86_64"))
+            }).unwrap_or(false);
+        let mut mateengine_elements = Vec::new();
         let upper_layers_started_at = Instant::now();
-        let upper_layer_elements = {
+        let (upper_layer_elements, dock_layer_elements) = {
             timescope::scope!("tty upper layer scene");
             upper_layer_scene_elements(
                 &mut backend.renderer,
@@ -3763,14 +3775,19 @@ fn render_surface(
                 scale,
                 upper_layer_backdrop_windows,
                 fullscreen_window.is_some(),
+                promote_mateengine,
                 &mut state.layer_backdrop_cache,
                 &mut state.layer_framebuffer_effect_states,
                 &mut state.layer_effect_cache,
             )?
         };
         let mut fullscreen_overlay_visible =
-            fullscreen_window.is_some() && !upper_layer_elements.is_empty();
+            fullscreen_window.is_some() && (!upper_layer_elements.is_empty()
+                || crate::backend::overlay::has_output(&output.name()));
         scene_elements.extend(upper_layer_elements);
+        let mateengine_insert_at = scene_elements.len();
+        scene_elements.extend(dock_layer_elements);
+        let mut overlay_below_layers = scene_elements.len();
         let upper_layers_elapsed_ms = upper_layers_started_at.elapsed().as_secs_f64() * 1000.0;
         timing.upper_layers_elapsed_ms = upper_layers_elapsed_ms;
         let closing_snapshots_started_at = Instant::now();
@@ -3848,6 +3865,7 @@ fn render_surface(
                     continue;
                 }
                 let window_started_at = Instant::now();
+                let window_scene_start = scene_elements.len();
                 let mut window_timing = TtyWindowTimingMetrics::default();
                 let Some(window_location) = space.element_location(window) else {
                     continue;
@@ -6530,12 +6548,20 @@ fn render_surface(
                     );
                 }
                 window_loop_elapsed_ms += window_elapsed_ms;
+                if promote_mateengine && window_decorations.get(window).is_some_and(|decoration|
+                    decoration.snapshot.app_id.as_deref() == Some("MateEngineX.x86_64")) {
+                    // Move this frame's existing elements, never capture or
+                    // duplicate the Unity buffer to draw the foreground legs.
+                    mateengine_elements.extend(scene_elements.drain(window_scene_start..));
+                }
                 if window_elapsed_ms > max_window_elapsed_ms {
                     max_window_elapsed_ms = window_elapsed_ms;
                     max_window_id = Some(window_id);
                 }
             }
         }
+        overlay_below_layers += mateengine_elements.len();
+        scene_elements.splice(mateengine_insert_at..mateengine_insert_at, mateengine_elements);
         timing.transform_snapshot_window_count = frame_transform_snapshot_window_count;
         timing.snapshot_capture_count = snapshot_capture_count;
         timing.window_loop_elapsed_ms = window_loop_elapsed_ms;
@@ -6582,6 +6608,7 @@ fn render_surface(
         };
         fullscreen_overlay_visible |=
             fullscreen_window.is_some() && !layer_popup_elements.is_empty();
+        overlay_below_layers += layer_popup_elements.len();
         let mut front_to_back_scene = layer_popup_elements;
         front_to_back_scene.append(&mut scene_elements);
         scene_elements = front_to_back_scene;
@@ -6627,6 +6654,7 @@ fn render_surface(
                     .map(TtyRenderElements::Damage),
             );
         }
+        overlay_below_layers += content_elements.len();
         content_elements.extend(scene_elements);
 
         let cursor_status_for_log = cursor_override
@@ -6654,19 +6682,28 @@ fn render_surface(
                 .map(TtyRenderElements::Window),
             );
         }
+        overlay_below_layers += content_for_capture.len();
         content_for_capture.extend(content_elements);
         if state.session_lock_active {
             surface.workspace_wave = None;
             surface.workspace_scene.clear();
         } else {
             match workspace_wave_element(&mut backend.renderer, surface) {
-                Ok(Some(wave)) => content_for_capture.insert(0, wave),
+                Ok(Some(wave)) => {
+                    content_for_capture.insert(0, wave);
+                    overlay_below_layers += 1;
+                },
                 Ok(None) => {}
                 Err(error) => {
                     surface.workspace_wave = None;
                     warn!(?error, "workspace shader failed; showing live desktop");
                 }
             }
+        }
+        if !state.session_lock_active {
+            state.output_overlays.render(&mut backend.renderer, &output,
+                (output_geo.size.w, output_geo.size.h), scale, &mut content_for_capture,
+                overlay_below_layers, TtyRenderElements::Snapshot);
         }
         // The element count for diagnostics — final elements is built below
         // after capture has run against the by-reference slices.
@@ -11664,13 +11701,11 @@ fn lower_layer_scene_elements(
             continue;
         };
         {
-            let stable_key = format!(
-                "__layer_background_effect_{}_{}_{}_{}x{}",
-                output.name(),
-                layer_id,
-                index,
+            let stable_key = crate::backend::shader_effect::lower_layer_backdrop_key(
+                &output.name(),
+                &layer_id,
                 effect_rect.width,
-                effect_rect.height
+                effect_rect.height,
             );
             let blur_padding = backdrop_effect.capture_padding.max(0);
             let capture_geo = smithay::utils::Rectangle::new(
@@ -11686,6 +11721,8 @@ fn lower_layer_scene_elements(
             );
             let mut hasher = SignatureHasher::default();
             stable_key.hash(&mut hasher);
+            // Stack changes invalidate the backdrop, not persistent effect state.
+            index.hash(&mut hasher);
             // The layers below this one; their content changes arrive as source damage.
             hash_layer_scene_contributors(
                 &mut hasher,
@@ -12042,6 +12079,7 @@ fn upper_layer_scene_elements(
     // Fullscreen fast path: a fullscreen window stacks above the Top layer
     // but below Overlay, so only Overlay surfaces stay visible.
     overlay_only: bool,
+    defer_pet_dock: bool,
     layer_backdrop_cache: &mut std::collections::HashMap<
         String,
         crate::backend::shader_effect::CachedBackdropTexture,
@@ -12054,7 +12092,7 @@ fn upper_layer_scene_elements(
         String,
         crate::backend::shader_effect::WindowEffectElementState,
     >,
-) -> Result<Vec<TtyRenderElements>, Box<dyn std::error::Error>> {
+) -> Result<(Vec<TtyRenderElements>, Vec<TtyRenderElements>), Box<dyn std::error::Error>> {
     let map = layer_map_for_output(output);
     let layer_kinds: &[smithay::wayland::shell::wlr_layer::Layer] = if overlay_only {
         &[smithay::wayland::shell::wlr_layer::Layer::Overlay]
@@ -12072,7 +12110,9 @@ fn upper_layer_scene_elements(
     drop(map);
 
     let mut elements = Vec::new();
+    let mut dock_elements = Vec::new();
     for (layer_index, layer_surface) in upper_layers.iter().enumerate() {
+        let layer_start = elements.len();
         let layer_surface = layer_surface.clone();
         // Upper layers stacked below this one (the list is front-to-back);
         // backdrop captures must see them since they draw above all windows.
@@ -12154,8 +12194,11 @@ fn upper_layer_scene_elements(
                 custom_background,
             )?);
         }
+        if defer_pet_dock && layer_surface.namespace() == "shoji-dock" {
+            dock_elements.extend(elements.drain(layer_start..));
+        }
     }
-    Ok(elements)
+    Ok((elements, dock_elements))
 }
 
 fn configured_background_framebuffer_effect_elements_for_layer(

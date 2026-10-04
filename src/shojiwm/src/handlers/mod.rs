@@ -235,6 +235,8 @@ impl SessionLockHandler for ShojiWM {
     }
 
     fn lock(&mut self, confirmation: SessionLocker) {
+        crate::backend::overlay::close_all("Session locked");
+        self.output_overlays.clear();
         self.session_lock_active = true;
         self.layer_shell_on_demand_focus = None;
         // Park the focus owner rather than dropping it: `unlock` restores it.

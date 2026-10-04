@@ -687,6 +687,7 @@ export type EffectDependencyHandle =
   | PopupSourceHandle;
 
 export type EffectInputHandle =
+  | import("./overlay").SnapshotSourceHandle
   | BackdropSourceHandle
   | XrayBackdropSourceHandle
   | ShaderInputHandle
@@ -2220,6 +2221,11 @@ export type WindowCompositionFunction = (
   context: WindowCompositionContext,
 ) => CompositionRenderable;
 
+export interface CompositorEffectController extends CompositorEffectConfig {
+  /** Render an output effect; resolves after capture and successful first GPU evaluation. */
+  overlay: typeof import("./overlay").overlay;
+}
+
 /**
  * The root API object exposed to ShojiWM config scripts.
  * ShojiWM の設定スクリプトに公開されるルート API オブジェクト。
@@ -2303,7 +2309,8 @@ export interface CompositorDefinition {
    *   window.isFullscreen() ? null : { behind: frostedGlass };
    * ```
    */
-  effect: CompositorEffectConfig;
+  get effect(): CompositorEffectController;
+  set effect(value: CompositorEffectConfig);
   /**
    * Rendering policies that override how the compositor treats individual
    * surfaces, independent of effects and decorations.

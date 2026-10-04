@@ -4,7 +4,7 @@ sidebar_position: 10
 
 # Effects
 
-ShojiWM can run GPU shader effects in four places, configured via
+ShojiWM can run GPU shader effects in these places, configured via
 `COMPOSITOR.effect`:
 
 | Field | Type | Applies to |
@@ -13,6 +13,7 @@ ShojiWM can run GPU shader effects in four places, configured via
 | `window` | `(window) => WindowEffectAssignment \| null` | Per toplevel window |
 | `layer` | `(layer) => LayerEffectAssignment \| null` | Per layer-shell surface (bars, docks) |
 | `popup` | `(popup) => PopupEffectAssignment \| null` | Per popup (menus, tooltips) |
+| [`overlay`](./output-overlays.md) | `(output, options) => Promise<OverlayHandle>` | Temporary or persistent fullscreen output effects |
 
 You can also apply an effect to a region inside the composition with
 [`<ShaderEffect/>`](./components.md#shadereffect).

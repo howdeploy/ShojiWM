@@ -436,6 +436,8 @@ pub struct ShojiWM {
     pub popup_framebuffer_effect_states:
         HashMap<String, crate::backend::shader_effect::ShaderEffectElementState>,
     pub output_capture_mirrors: HashMap<String, crate::backend::tty::OutputCaptureMirror>,
+    pub(crate) output_overlays: crate::backend::overlay::OutputOverlays,
+    output_overlay_timer_active: bool,
     pub pointer_contents: PointerContents,
     pub decoration_hover_target: Option<TrackedDecorationInteractionTarget>,
     pub decoration_active_target: Option<TrackedDecorationInteractionTarget>,
@@ -1156,8 +1158,17 @@ impl ShojiWM {
         // leaving the keyboard on nothing.
         self.windows_top_to_bottom()
             .into_iter()
-            .find(|window| self.window_allows_input(window))
+            .find(|window| {
+                self.window_allows_input(window) && !self.excluded_from_automatic_focus(window)
+            })
             .cloned()
+    }
+
+    /// Desktop pets stay above other windows but must only get keyboard focus
+    /// from an explicit click or activation, never from this automatic
+    /// fallback. Local fork: replace with a per-window config flag upstream.
+    fn excluded_from_automatic_focus(&self, window: &Window) -> bool {
+        self.snapshot_window(window).app_id.as_deref() == Some("MateEngineX.x86_64")
     }
 
     fn prune_keyboard_focus_targets(&mut self) {
@@ -1547,6 +1558,9 @@ impl ShojiWM {
         // Register a SIGUSR1 source so the embedded runtime can wake the event
         // loop after handling an IPC request.
         Self::register_runtime_wake_signal(event_loop);
+        if let Err(error) = Self::register_logout_listener(event_loop) {
+            warn!(?error, "failed to register local logout listener");
+        }
 
         let damage_blink_enabled = std::env::args().any(|arg| arg == "--damage-blink")
             || std::env::var_os("SHOJI_DAMAGE_BLINK")
@@ -1752,6 +1766,8 @@ impl ShojiWM {
             popup_effect_cache: HashMap::new(),
             popup_framebuffer_effect_states: HashMap::new(),
             output_capture_mirrors: HashMap::new(),
+            output_overlays: crate::backend::overlay::OutputOverlays::default(),
+            output_overlay_timer_active: false,
             pointer_contents: PointerContents::default(),
             decoration_hover_target: None,
             decoration_active_target: None,
@@ -2525,6 +2541,32 @@ impl ShojiWM {
         self.schedule_runtime_scheduler_kick(&loop_handle, next_poll_in_ms);
     }
 
+    fn register_logout_listener(event_loop: &mut EventLoop<'static, Self>) -> std::io::Result<()> {
+        use std::os::{linux::net::SocketAddrExt, unix::net::{SocketAddr, UnixListener}};
+
+        // Abstract sockets disappear with the process and cannot leave a stale path.
+        let name = format!("shojiwm-logout-{}", std::process::id());
+        let address = SocketAddr::from_abstract_name(name)?;
+        let listener = UnixListener::bind_addr(&address)?;
+        listener.set_nonblocking(true)?;
+        let uid = unsafe { libc::geteuid() };
+        event_loop.handle().insert_source(
+            Generic::new(listener, Interest::READ, Mode::Level),
+            move |_, listener, state| {
+                match listener.accept() {
+                    Ok((stream, _)) => match socket_peercred(&stream) {
+                        Ok(peer) if peer.uid.as_raw() == uid => state.shutdown(),
+                        _ => warn!("rejected logout request from another user"),
+                    },
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {},
+                    Err(error) => warn!(?error, "failed to accept logout request"),
+                }
+                Ok(PostAction::Continue)
+            },
+        ).map_err(|error| std::io::Error::other(error.to_string()))?;
+        Ok(())
+    }
+
     fn register_runtime_wake_signal(event_loop: &mut EventLoop<'static, Self>) {
         use calloop::signals::{Signal, Signals};
 
@@ -2539,10 +2581,43 @@ impl ShojiWM {
             .handle()
             .insert_source(signals, |_event, _, state| {
                 state.record_event_source_wake("runtime-wake-signal");
+                state.tick_output_overlays();
+                state.schedule_output_overlay_tick();
                 let _ = state.tick_runtime_scheduler_with(true);
             });
         if let Err(error) = insert {
             warn!(?error, "failed to register runtime wake signal source");
+        }
+    }
+
+    fn tick_output_overlays(&mut self) -> u64 {
+        let outputs: Vec<_> = self.space.outputs()
+            .filter(|output| self.runtime_output_render_enabled(&output.name())).cloned().collect();
+        let unavailable = self.session_lock_active || (!self.tty_backends.is_empty() && !self.tty_session_active);
+        if self.output_overlays.tick(&outputs, unavailable) {
+            self.schedule_redraw();
+            self.runtime_frame_sync_interval_ms().min(crate::backend::overlay::deadline_interval_ms())
+        } else { crate::backend::overlay::deadline_interval_ms() }
+    }
+
+    fn schedule_output_overlay_tick(&mut self) {
+        if self.output_overlay_timer_active || !crate::backend::overlay::any() { return; }
+        let interval = self.runtime_frame_sync_interval_ms();
+        let result = self.loop_handle.insert_source(Timer::from_duration(Duration::from_millis(interval)), |_, _, state| {
+            let interval = state.tick_output_overlays();
+            if crate::backend::overlay::any() {
+                TimeoutAction::ToDuration(Duration::from_millis(interval))
+            } else {
+                state.output_overlay_timer_active = false;
+                TimeoutAction::Drop
+            }
+        });
+        match result {
+            Ok(_) => self.output_overlay_timer_active = true,
+            Err(error) => {
+                crate::backend::overlay::close_all("Cannot schedule output effects");
+                warn!(?error, "failed to schedule output overlay timer");
+            }
         }
     }
 
@@ -2609,6 +2684,8 @@ impl ShojiWM {
 
     pub fn reload_decoration_runtime(&mut self) {
         crate::backend::tty::clear_workspace_transitions(self);
+        crate::backend::overlay::close_all("Config reloaded");
+        self.output_overlays.clear();
         if self.decoration_evaluator.as_embedded().is_none() {
             self.config_error_report = Some(crate::config_error::ConfigErrorReport::hot_reload(
                 "hot reload is only available for the TypeScript runtime",
@@ -2686,6 +2763,8 @@ impl ShojiWM {
         self.configured_popup_surface_policies.clear();
         self.layer_effect_evaluation_cache.clear();
         self.popup_effect_evaluation_cache.clear();
+        self.layer_backdrop_cache.clear();
+        self.layer_effect_cache.clear();
         self.request_tty_maintenance("config-hot-reload");
         self.schedule_redraw();
         info!("hot reloaded TypeScript config");
@@ -3840,6 +3919,15 @@ impl ShojiWM {
         false
     }
 
+    fn mateengine_accepts_dock_point(&self, pos: Point<f64, Logical>) -> bool {
+        let logical_pos = LogicalPoint::new(pos.x.floor() as i32, pos.y.floor() as i32);
+        if let Some((_, decoration)) = self.window_under_transformed(logical_pos) {
+            return decoration.snapshot.app_id.as_deref() == Some("MateEngineX.x86_64");
+        }
+        self.raw_window_under(logical_pos).is_some_and(|(window, _)|
+            self.snapshot_window(window).app_id.as_deref() == Some("MateEngineX.x86_64"))
+    }
+
     fn is_window_root_surface(window: &Window, surface: &WlSurface) -> bool {
         window
             .toplevel()
@@ -3900,7 +3988,8 @@ impl ShojiWM {
                 if transformed_root.contains(LogicalPoint::new(
                     pos.x.floor() as i32,
                     pos.y.floor() as i32,
-                )) {
+                )) && self.client_input_region_accepts(window, Some(decoration), pos)
+                {
                     return None;
                 }
 
@@ -3925,7 +4014,8 @@ impl ShojiWM {
             if rect.contains(LogicalPoint::new(
                 pos.x.floor() as i32,
                 pos.y.floor() as i32,
-            )) {
+            )) && self.client_input_region_accepts(window, None, pos)
+            {
                 return None;
             }
         }
@@ -3966,7 +4056,8 @@ impl ShojiWM {
                 if transformed_root.contains(LogicalPoint::new(
                     pos.x.floor() as i32,
                     pos.y.floor() as i32,
-                )) {
+                )) && self.client_input_region_accepts(window, Some(decoration), pos)
+                {
                     return None;
                 }
 
@@ -3985,7 +4076,8 @@ impl ShojiWM {
             if rect.contains(LogicalPoint::new(
                 pos.x.floor() as i32,
                 pos.y.floor() as i32,
-            )) {
+            )) && self.client_input_region_accepts(window, None, pos)
+            {
                 return None;
             }
         }
@@ -4038,6 +4130,13 @@ impl ShojiWM {
                     .map(|(surface, loc)| {
                         (surface, (loc + layer_geo.loc + output_geo.loc).to_f64())
                     });
+                if layer.namespace() == "shoji-dock"
+                    && result.as_ref().is_some_and(|(surface, _)|
+                        !self.surface_has_popup_ancestor_for_hit_test(surface))
+                    && self.mateengine_accepts_dock_point(pos)
+                {
+                    return None;
+                }
                 debug!(
                     pos = ?pos,
                     output = %output_geo.loc.x,
@@ -4067,10 +4166,69 @@ impl ShojiWM {
             }
             let transformed_root =
                 transformed_root_rect(decoration.layout.root.rect, decoration.visual_transform);
-            transformed_root
-                .contains(logical_pos)
-                .then_some((window, decoration))
+            if !transformed_root.contains(logical_pos) {
+                return None;
+            }
+            if !self.client_input_region_accepts(window, Some(decoration), pos) {
+                return None;
+            }
+            Some((window, decoration))
         })
+    }
+
+    /// `false` only when the point lies inside the client area of a window
+    /// whose root surface set an explicit input region that excludes it, so
+    /// hit testing falls through to the window below (desktop pets, overlays
+    /// shaped with XShape through Xwayland). Decoration areas always accept.
+    pub(crate) fn client_input_region_accepts(
+        &self,
+        window: &Window,
+        decoration: Option<&WindowDecorationState>,
+        pos: Point<f64, Logical>,
+    ) -> bool {
+        let root_surface = window
+            .toplevel()
+            .map(|surface| surface.wl_surface().clone())
+            .or_else(|| window.x11_surface().and_then(|surface| surface.wl_surface()));
+        let Some(root_surface) = root_surface else {
+            return true;
+        };
+        let has_input_region = with_states(&root_surface, |states| {
+            states
+                .cached_state
+                .get::<SurfaceAttributes>()
+                .current()
+                .input_region
+                .is_some()
+        });
+        if !has_input_region {
+            return true;
+        }
+        let Some(location) = self.space.element_location(window) else {
+            return true;
+        };
+        let local_pos = match decoration {
+            Some(decoration) => {
+                let logical_pos = LogicalPoint::new(pos.x.floor() as i32, pos.y.floor() as i32);
+                let transformed_client = transformed_rect(
+                    decoration.client_rect,
+                    decoration.layout.root.rect,
+                    decoration.visual_transform,
+                );
+                if !transformed_client.contains(logical_pos) {
+                    return true;
+                }
+                inverse_transform_point(
+                    pos,
+                    decoration.layout.root.rect,
+                    decoration.visual_transform,
+                )
+            }
+            None => pos,
+        };
+        window
+            .surface_under(local_pos - location.to_f64(), WindowSurfaceType::ALL)
+            .is_some()
     }
 
     pub fn raw_window_under(&self, logical_pos: LogicalPoint) -> Option<(&Window, LogicalRect)> {
@@ -4094,7 +4252,10 @@ impl ShojiWM {
                 }
             }
             let rect = self.window_bbox_rect(window)?;
-            rect.contains(logical_pos).then_some((window, rect))
+            if !rect.contains(logical_pos) || !self.client_input_region_accepts(window, None, pos) {
+                return None;
+            }
+            Some((window, rect))
         })
     }
 

@@ -1,8 +1,10 @@
 # KISA desktop compositor snapshot
 
-Branch `howdeploy/desktop-20261004` preserves the compositor source used by the
+The fork's `main` branch includes the compositor source used by the
 KISA ShojiWM desktop on 2026-10-04, on top of upstream integration commit
-`dcea1dd`. It is intentionally separate from upstream `main` and the earlier
+`dcea1dd`. `howdeploy/desktop-20261004` remains an archival snapshot; `main`
+is the entry point for compatibility with KISA Stack. This is the author's
+fork, distinct from upstream `bea4dev/ShojiWM` and the earlier
 `howdeploy/stack` branch. Desktop configuration is published in
 [KISA Stack](https://github.com/howdeploy/kisa-stack/tree/main/dotfiles).
 

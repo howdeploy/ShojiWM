@@ -14,7 +14,7 @@ use crate::state::ShojiWM;
 
 /// Read the live (title, app_id) for a Window — wayland or xwayland — using
 /// the same accessors as our SSD snapshots.
-fn read_title_app_id(window: &Window) -> (String, String) {
+pub(crate) fn read_title_app_id(window: &Window) -> (String, String) {
     if let Some(toplevel) = window.toplevel() {
         return with_states(toplevel.wl_surface(), |states| {
             let role = states

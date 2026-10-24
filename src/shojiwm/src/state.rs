@@ -3925,7 +3925,7 @@ impl ShojiWM {
             return decoration.snapshot.app_id.as_deref() == Some("MateEngineX.x86_64");
         }
         self.raw_window_under(logical_pos).is_some_and(|(window, _)|
-            self.snapshot_window(window).app_id.as_deref() == Some("MateEngineX.x86_64"))
+            crate::foreign_toplevel::read_title_app_id(window).1 == "MateEngineX.x86_64")
     }
 
     fn is_window_root_surface(window: &Window, surface: &WlSurface) -> bool {

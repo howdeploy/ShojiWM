@@ -1,7 +1,7 @@
 use smithay::{
     backend::{
         input::{
-            AbsolutePositionEvent, Axis, AxisSource, ButtonState, Event, GestureBeginEvent,
+            AbsolutePositionEvent, Axis, AxisSource, ButtonState, Device, Event, GestureBeginEvent,
             GestureEndEvent, GestureSwipeUpdateEvent, InputBackend, InputEvent, KeyState,
             KeyboardKeyEvent, PointerAxisEvent, PointerButtonEvent, PointerMotionEvent,
         },
@@ -9,7 +9,7 @@ use smithay::{
     },
     desktop::{Window, WindowSurfaceType},
     input::{
-        keyboard::{FilterResult, keysyms},
+        keyboard::{FilterResult, KeyboardSource, keysyms},
         pointer::{
             AxisFrame, ButtonEvent, CursorIcon, GrabStartData as PointerGrabStartData, MotionEvent,
             RelativeMotionEvent,
@@ -112,6 +112,20 @@ fn constrain_pointer_location_to_outputs(
     }
 
     nearest.map(|(location, _)| location)
+}
+
+fn confined_pointer_axis_fallback(
+    previous: Point<f64, Logical>,
+    attempted: Point<f64, Logical>,
+    mut accepts: impl FnMut(Point<f64, Logical>) -> bool,
+) -> Option<Point<f64, Logical>> {
+    // An outward component must not discard movement along the confinement edge.
+    [
+        Point::from((attempted.x, previous.y)),
+        Point::from((previous.x, attempted.y)),
+    ]
+    .into_iter()
+    .find(|candidate| *candidate != previous && accepts(*candidate))
 }
 
 /// Classify a raw keysym as a modifier key (for modifier-tap detection),
@@ -239,6 +253,27 @@ impl ShojiWM {
         )
     }
 
+    /// Input that switches back on the outputs powered off with `wake_on_input`. Releases are
+    /// left out: the key binding that switched the outputs off would otherwise switch them
+    /// straight back on when its keys are let go.
+    fn input_event_wakes_outputs<I: InputBackend>(event: &InputEvent<I>) -> bool {
+        match event {
+            InputEvent::Keyboard { event } => event.state() == KeyState::Pressed,
+            InputEvent::PointerButton { event } => event.state() == ButtonState::Pressed,
+            InputEvent::PointerMotion { .. }
+            | InputEvent::PointerMotionAbsolute { .. }
+            | InputEvent::PointerAxis { .. }
+            | InputEvent::TouchDown { .. }
+            | InputEvent::GestureSwipeBegin { .. }
+            | InputEvent::GesturePinchBegin { .. }
+            | InputEvent::GestureHoldBegin { .. }
+            | InputEvent::TabletToolProximity { .. }
+            | InputEvent::TabletToolTip { .. }
+            | InputEvent::TabletToolButton { .. } => true,
+            _ => false,
+        }
+    }
+
     fn notify_idle_activity(&mut self) {
         self.refresh_idle_inhibit_state();
         let seat = self.seat.clone();
@@ -249,8 +284,10 @@ impl ShojiWM {
         &mut self,
         event: &I::KeyboardKeyEvent,
         serial: Serial,
+        source: KeyboardSource,
     ) {
-        let _ = self.seat.get_keyboard().unwrap().input(
+        let _ = self.seat.get_keyboard().unwrap().input_from_source(
+            source,
             self,
             event.key_code(),
             event.state(),
@@ -470,22 +507,37 @@ impl ShojiWM {
         // user asked for this window" from "an application asked for itself".
         // Saved and restored rather than cleared so the flag survives nesting.
         let previous = std::mem::replace(&mut self.user_input_in_flight, true);
+        let now = std::time::Duration::from(self.clock.now()).as_millis() as u32;
+        if self.release_inactive_pointer_constraint(now) {
+            self.refresh_pointer_focus(now);
+        }
         self.process_input_event_inner(event);
+        self.apply_pending_output_power_requests();
         self.user_input_in_flight = previous;
+        if !previous {
+            self.input_woke_outputs = false;
+        }
     }
 
     fn process_input_event_inner<I: InputBackend>(&mut self, event: InputEvent<I>) {
         if Self::input_event_counts_as_idle_activity(&event) {
             self.notify_idle_activity();
         }
+        if Self::input_event_wakes_outputs(&event) {
+            self.wake_outputs_on_input();
+        }
 
         match event {
             InputEvent::Keyboard { event, .. } => {
                 let device = event.device();
+                let source = *self
+                    .keyboard_sources
+                    .entry(device.id())
+                    .or_insert_with(KeyboardSource::new_auxiliary);
                 crate::runtime_input::apply_keyboard_config_for_backend_device(self, &device);
                 let serial = SERIAL_COUNTER.next_serial();
                 if self.session_lock_active {
-                    self.forward_locked_keyboard_event::<I>(&event, serial);
+                    self.forward_locked_keyboard_event::<I>(&event, serial, source);
                     return;
                 }
                 // Typing into a window is the strongest evidence that it is the
@@ -512,7 +564,8 @@ impl ShojiWM {
                     .seat
                     .get_keyboard()
                     .unwrap()
-                    .input(
+                    .input_from_source(
+                        source,
                         self,
                         event.key_code(),
                         event.state(),
@@ -683,6 +736,7 @@ impl ShojiWM {
                         self.run_runtime_key_binding(&id);
                     }
                 }
+                self.refresh_pointer_focus(time);
             }
             InputEvent::PointerMotion { event, .. } => {
                 let pointer = self.seat.get_pointer().unwrap();
@@ -750,7 +804,7 @@ impl ShojiWM {
                 let motion_delta =
                     self.pointer_motion_delta(&event.device(), event.delta(), previous_pos);
 
-                let Some(pos) = constrain_pointer_location_to_outputs(
+                let Some(mut pos) = constrain_pointer_location_to_outputs(
                     previous_pos + motion_delta,
                     self.space
                         .outputs()
@@ -768,7 +822,7 @@ impl ShojiWM {
                     return;
                 }
 
-                let next_contents = self.pointer_contents_at(pos);
+                let mut next_contents = self.pointer_contents_at(pos);
                 if pointer_confined {
                     let remains_on_surface = match (&under, &next_contents.surface) {
                         (Some((surface, _)), Some((next_surface, _))) => surface == next_surface,
@@ -780,21 +834,41 @@ impl ShojiWM {
                         })
                     });
                     if !remains_on_surface || !remains_in_region {
-                        pointer.relative_motion(
-                            self,
-                            under,
-                            &RelativeMotionEvent {
-                                delta: event.delta(),
-                                delta_unaccel: event.delta_unaccel(),
-                                utime: event.time(),
-                            },
-                        );
-                        pointer.frame(self);
-                        // Like a locked pointer, a rejected confined movement has no
-                        // compositor-side visual change and therefore no redraw to promptly flush
-                        // this event.
-                        let _ = self.display_handle.flush_clients();
-                        return;
+                        let fallback =
+                            confined_pointer_axis_fallback(previous_pos, pos, |candidate| {
+                                let in_region = confine_region.as_ref().is_none_or(|region| {
+                                    under.as_ref().is_some_and(|(_, origin)| {
+                                        region.contains((candidate - *origin).to_i32_floor())
+                                    })
+                                });
+                                if !in_region {
+                                    return false;
+                                }
+                                let candidate_contents = self.pointer_contents_at(candidate);
+                                match (&under, &candidate_contents.surface) {
+                                    (Some((surface, _)), Some((candidate_surface, _))) => {
+                                        surface == candidate_surface
+                                    }
+                                    _ => false,
+                                }
+                            });
+                        if let Some(fallback) = fallback {
+                            pos = fallback;
+                            next_contents = self.pointer_contents_at(pos);
+                        } else {
+                            pointer.relative_motion(
+                                self,
+                                under,
+                                &RelativeMotionEvent {
+                                    delta: event.delta(),
+                                    delta_unaccel: event.delta_unaccel(),
+                                    utime: event.time(),
+                                },
+                            );
+                            pointer.frame(self);
+                            let _ = self.display_handle.flush_clients();
+                            return;
+                        }
                     }
                 }
 
@@ -2213,6 +2287,22 @@ impl ShojiWM {
             source,
             timestamp: now_ms,
         };
+        if !source.permits_background_focus()
+            && !self
+                .seat
+                .get_keyboard()
+                .and_then(|keyboard| keyboard.current_focus())
+                .is_some_and(|active| self.surface_belongs_to_window(window, &active))
+        {
+            // Handle the refusal before TS can switch workspaces; true also
+            // prevents the protocol handler's fallback from focusing it.
+            info!(
+                window_id = %snapshot.id,
+                source = ?source,
+                "blocked background window activation"
+            );
+            return true;
+        }
         tracing::info!(
             window_id = %snapshot.id,
             title = %snapshot.title,
@@ -2852,6 +2942,10 @@ impl ShojiWM {
         if self.session_lock_active {
             return;
         }
+        if !self.user_input_in_flight && self.background_parent_blocks_focus(window) {
+            info!(window_id = window.id(), "blocked background dialog focus");
+            return;
+        }
         if self.automatic_focus_is_superseded(window) {
             debug!(
                 window_id = window
@@ -2890,6 +2984,7 @@ impl ShojiWM {
     }
 
     pub(crate) fn refresh_pointer_focus(&mut self, time_msec: u32) {
+        self.release_inactive_pointer_constraint(time_msec);
         let Some(pointer) = self.seat.get_pointer() else {
             return;
         };
@@ -2935,6 +3030,66 @@ impl ShojiWM {
         }
         self.update_decoration_hover_target(location);
         self.update_decoration_cursor_icon(location);
+        self.activate_pointer_constraint_at(location);
+    }
+
+    pub(crate) fn pointer_constraint_allowed(&self, surface: &WlSurface) -> bool {
+        if self.session_lock_active {
+            return false;
+        }
+        let Some(window) = self.window_for_pointer_surface(surface) else {
+            return false;
+        };
+        self.window_allows_input(&window)
+            && self
+                .seat
+                .get_keyboard()
+                .and_then(|keyboard| keyboard.current_focus())
+                .is_some_and(|focused| self.surface_belongs_to_window(&window, &focused))
+    }
+
+    fn release_inactive_pointer_constraint(&mut self, time: u32) -> bool {
+        let Some(pointer) = self.seat.get_pointer() else {
+            return false;
+        };
+        let Some(surface) = pointer.current_focus() else {
+            return false;
+        };
+        let active = with_pointer_constraint(&surface, &pointer, |constraint| {
+            constraint.is_some_and(|constraint| constraint.is_active())
+        });
+        if !active || self.pointer_constraint_allowed(&surface) {
+            return false;
+        }
+        let released = with_pointer_constraint(&surface, &pointer, |constraint| {
+            if let Some(constraint) = constraint.filter(|constraint| constraint.is_active()) {
+                constraint.deactivate();
+                true
+            } else {
+                false
+            }
+        });
+        if released {
+            let serial = SERIAL_COUNTER.next_serial();
+            // A held game button must not keep its implicit grab on the old desktop.
+            pointer.unset_grab(self, serial, time);
+            pointer.motion(
+                self,
+                None,
+                &MotionEvent {
+                    location: pointer.current_location(),
+                    serial,
+                    time,
+                },
+            );
+            pointer.frame(self);
+            self.pointer_contents = self.pointer_contents_at(pointer.current_location());
+            tracing::info!(
+                surface_id = surface.id().protocol_id(),
+                "released inactive pointer constraint"
+            );
+        }
+        released
     }
 
     fn active_pointer_lock_focus(
@@ -2972,6 +3127,9 @@ impl ShojiWM {
             return;
         };
         if pointer.current_focus().as_ref() != Some(&surface) {
+            return;
+        }
+        if !self.pointer_constraint_allowed(&surface) {
             return;
         }
 
@@ -3024,9 +3182,112 @@ fn resize_edges_to_grab(edges: ResizeEdges) -> ResizeEdge {
 }
 
 #[cfg(test)]
+mod keyboard_device_tests {
+    use super::*;
+    use smithay::input::{SeatHandler, SeatState};
+    use smithay::wayland::compositor::{CompositorClientState, CompositorHandler, CompositorState};
+
+    #[derive(Default)]
+    struct InputState {
+        seats: SeatState<Self>,
+    }
+
+    impl SeatHandler for InputState {
+        type KeyboardFocus = WlSurface;
+        type PointerFocus = WlSurface;
+        type TouchFocus = WlSurface;
+
+        fn seat_state(&mut self) -> &mut SeatState<Self> {
+            &mut self.seats
+        }
+    }
+
+    impl CompositorHandler for InputState {
+        fn compositor_state(&mut self) -> &mut CompositorState {
+            unreachable!("keyboard-only fixture has no surfaces")
+        }
+
+        fn client_compositor_state<'a>(
+            &self,
+            _client: &'a smithay::reexports::wayland_server::Client,
+        ) -> &'a CompositorClientState {
+            unreachable!("keyboard-only fixture has no clients")
+        }
+
+        fn commit(&mut self, _surface: &WlSurface) {
+            unreachable!("keyboard-only fixture has no surfaces")
+        }
+    }
+
+    #[test]
+    fn keyboard_devices_keep_modifiers_until_the_last_holder_releases() {
+        let mut state = InputState::default();
+        let mut seat = state.seats.new_seat("input-regression");
+        let keyboard = seat.add_keyboard(Default::default(), 200, 25).unwrap();
+        let aula = KeyboardSource::new_auxiliary();
+        let controller = KeyboardSource::new_auxiliary();
+        let super_key = 133u32.into(); // evdev KEY_LEFTMETA + XKB offset
+        for (source, phase) in [
+            (aula, KeyState::Pressed),
+            (controller, KeyState::Pressed),
+            (controller, KeyState::Released),
+        ] {
+            keyboard.input_from_source(
+                source, &mut state, super_key, phase, SERIAL_COUNTER.next_serial(), 0,
+                |_, _, _| FilterResult::<()>::Forward,
+            );
+        }
+        assert!(keyboard.modifier_state().logo);
+
+        // Hot-unplug must release only this device's held keys.
+        keyboard.release_source(&mut state, aula);
+        assert!(!keyboard.modifier_state().logo);
+        assert!(keyboard.pressed_keys().is_empty());
+        keyboard.input_from_source(
+            controller, &mut state, super_key, KeyState::Pressed,
+            SERIAL_COUNTER.next_serial(), 0, |_, _, _| FilterResult::<()>::Forward,
+        );
+        assert!(keyboard.modifier_state().logo);
+        keyboard.release_source(&mut state, controller);
+        assert!(!keyboard.modifier_state().logo);
+    }
+}
+
+#[cfg(test)]
 mod pointer_output_constraint_tests {
-    use super::constrain_pointer_location_to_outputs;
+    use super::{confined_pointer_axis_fallback, constrain_pointer_location_to_outputs};
     use smithay::utils::{Logical, Point, Rectangle};
+
+    #[test]
+    fn confined_motion_slides_along_each_edge_on_an_offset_output() {
+        let bounds = Rectangle::<i32, Logical>::new((1920, 0).into(), (1920, 1080).into());
+        for (previous, attempted, expected) in [
+            ((1920.25, 500.0), (1915.0, 510.0), (1920.25, 510.0)),
+            ((3839.5, 500.0), (3845.0, 510.0), (3839.5, 510.0)),
+            ((2500.0, 0.25), (2510.0, -5.0), (2510.0, 0.25)),
+            ((2500.0, 1079.5), (2510.0, 1085.0), (2510.0, 1079.5)),
+        ] {
+            assert_eq!(
+                confined_pointer_axis_fallback(previous.into(), attempted.into(), |candidate| {
+                    bounds.contains(candidate.to_i32_floor())
+                }),
+                Some(expected.into()),
+            );
+        }
+    }
+
+    #[test]
+    fn confined_motion_stays_inside_a_blocked_corner() {
+        let bounds = Rectangle::<i32, Logical>::new((1920, 0).into(), (1920, 1080).into());
+        assert_eq!(
+            confined_pointer_axis_fallback(
+                (3839.5, 1079.5).into(),
+                (3845.0, 1085.0).into(),
+                |candidate| bounds.contains(candidate.to_i32_floor()),
+            ),
+            None,
+        );
+    }
 
     fn outputs_with_vertical_notch() -> [Rectangle<i32, Logical>; 2] {
         [

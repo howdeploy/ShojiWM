@@ -1059,6 +1059,22 @@ export interface OutputMode {
   refreshRate: number;
 }
 
+/** Panel power for `COMPOSITOR.output.setPower`. / `COMPOSITOR.output.setPower` で指定する電源状態。 */
+export type OutputPower = "on" | "off" | "toggle";
+
+export interface OutputPowerOptions {
+  /** Output name; every output when omitted. / 出力名。省略すると全出力。 */
+  output?: string;
+  /**
+   * Only when switching off: switch back on at the next key press, click,
+   * pointer motion, scroll or touch. Releases do not count, so a key binding
+   * can use it. Defaults to `false`.
+   * 消灯時のみ有効。次のキー押下・クリック・ポインター移動・スクロール・タッチで
+   * 再点灯します。キーを離す操作は数えないので、キーバインドからも使えます。既定は `false`。
+   */
+  wakeOnInput?: boolean;
+}
+
 export type OutputResolutionPreference =
   | "best"
   | {
@@ -1261,6 +1277,18 @@ export interface OutputController {
    * 登録済みの `configure` ファクトリーを即時再実行します。
    */
   reconfigure(): void;
+  /**
+   * Switches panels on or off (DPMS) without changing the layout: windows stay
+   * where they are and the output stays connected and enabled. `"toggle"`
+   * switches the targeted outputs off when any of them is on, otherwise on.
+   * Only the TTY backend has panels to switch; nested sessions ignore it.
+   * Idle daemons can do the same through wlr-output-power-management (`wlopm`).
+   * レイアウトを変えずにパネルの電源を切り替えます（DPMS）。ウィンドウはそのままで、
+   * 出力も接続・有効のままです。`"toggle"` は対象のどれかが点灯中なら消灯、
+   * そうでなければ点灯します。TTY バックエンドのみ対応で、ネスト実行では無視されます。
+   * アイドルデーモンからは wlr-output-power-management（`wlopm`）で同じ操作ができます。
+   */
+  setPower(power: OutputPower, options?: OutputPowerOptions): void;
 }
 
 export interface WorkspaceConfigEntry {

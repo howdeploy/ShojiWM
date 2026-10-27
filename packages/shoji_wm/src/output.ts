@@ -5,6 +5,8 @@ import type {
   OutputConfigureFactory,
   OutputController,
   OutputInfo,
+  OutputPower,
+  OutputPowerOptions,
   OutputStateSnapshot,
 } from "./types";
 import type { OutputChangeEvent } from "./events";
@@ -290,6 +292,31 @@ export function takePendingDisplayConfig(): DisplayConfigDraft | undefined {
   return cloneDisplayDraft(desiredOutputConfig);
 }
 
+type NativeOutputPower = (
+  power: OutputPower,
+  output: string,
+  wakeOnInput: boolean,
+) => void;
+
+/**
+ * Forward a power change to the compositor. Outside the ShojiWM runtime (unit
+ * tests, type checks) there is no panel to switch, so this does nothing.
+ */
+export function setOutputPower(
+  power: OutputPower,
+  options: OutputPowerOptions = {},
+): void {
+  if (power !== "on" && power !== "off" && power !== "toggle") {
+    throw new TypeError(
+      `output power must be "on", "off" or "toggle", got ${String(power)}`,
+    );
+  }
+  const native = (
+    globalThis as { __SHOJI_OUTPUT_POWER__?: NativeOutputPower }
+  ).__SHOJI_OUTPUT_POWER__;
+  native?.(power, options.output ?? "", options.wakeOnInput === true);
+}
+
 export const OUTPUT_CONTROLLER: OutputController = {
   get list() {
     return Object.values(currentOutputState)
@@ -320,6 +347,9 @@ export const OUTPUT_CONTROLLER: OutputController = {
   },
   reconfigure() {
     reconfigureOutputs();
+  },
+  setPower(power, options) {
+    setOutputPower(power, options);
   },
 };
 

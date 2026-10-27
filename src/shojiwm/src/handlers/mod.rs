@@ -152,6 +152,9 @@ smithay::delegate_dispatch2!(ShojiWM);
 
 impl PointerConstraintsHandler for ShojiWM {
     fn new_constraint(&mut self, surface: &WlSurface, pointer: &PointerHandle<Self>) {
+        if !self.pointer_constraint_allowed(surface) {
+            return;
+        }
         if pointer.current_focus().as_ref() != Some(surface) {
             return;
         }
@@ -388,7 +391,7 @@ impl ImageCopyCaptureHandler for ShojiWM {
                 frame.fail(CaptureFailureReason::Unknown);
                 return;
             };
-            if !self.runtime_output_render_enabled(&output.name()) {
+            if !self.output_capturable(&output.name()) {
                 frame.fail(CaptureFailureReason::Unknown);
                 return;
             }
@@ -1029,7 +1032,7 @@ impl crate::protocols::screencopy::ScreencopyHandler for ShojiWM {
     }
 
     fn screencopy_output_enabled(&self, output: &Output) -> bool {
-        self.runtime_output_render_enabled(&output.name())
+        self.output_capturable(&output.name())
     }
 
     fn screencopy_state(&mut self) -> &mut crate::protocols::screencopy::ScreencopyManagerState {
@@ -1039,5 +1042,6 @@ impl crate::protocols::screencopy::ScreencopyHandler for ShojiWM {
 
 crate::delegate_screencopy!(ShojiWM);
 crate::delegate_tearing_control!(ShojiWM);
+crate::delegate_output_power!(ShojiWM);
 crate::delegate_wlr_foreign_toplevel!(ShojiWM);
 crate::workspace_manager::delegate_ext_workspace_manager!(ShojiWM);

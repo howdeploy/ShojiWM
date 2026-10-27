@@ -164,6 +164,60 @@ Notes:
 - Clients are told at once: every bound `wl_output` receives a fresh `geometry`
   event, so a config reload takes effect without a reconnect.
 
+## Switching panels off (DPMS)
+
+`mode: 'disabled'` takes an output out of the desktop, so its windows move
+elsewhere. To blank a screen while you are away, switch its **power** instead:
+the output stays in the layout, windows stay where they are, and only the panel
+goes dark. This needs a TTY session; nested sessions have no panel and ignore
+it.
+
+### From an idle daemon
+
+ShojiWM implements `wlr-output-power-management`, so
+[`wlopm`](https://git.sr.ht/~leon_plickat/wlopm) works, for example with
+swayidle:
+
+```sh
+swayidle -w \
+  timeout 300 'swaylock -f' \
+  timeout 600 'wlopm --off "*"' resume 'wlopm --on "*"'
+```
+
+### From the config
+
+```ts
+// Every panel off until the next key press, click or pointer motion.
+COMPOSITOR.key.bind('screen-off', 'Super+Shift+O', () =>
+  COMPOSITOR.output.setPower('off', {wakeOnInput: true}),
+);
+
+COMPOSITOR.output.setPower('off', {output: 'HDMI-A-1'}); // one output
+COMPOSITOR.output.setPower('toggle'); // off if any targeted panel is on, else on
+COMPOSITOR.output.setPower('on');
+```
+
+`setPower` works from anywhere in the config: key bindings, timers, and IPC
+handlers (`createIpcServer` from `shoji_wm/ipc`), so an external script can also
+switch panels through an IPC method of your own. In a Rust config it is
+`COMPOSITOR.output.set_power(OutputPower::Off, OutputPowerOptions { wake_on_input: true, ..Default::default() })`.
+
+How the power state behaves:
+
+- An output switched off without `wakeOnInput` comes back only when asked
+  (`setPower('on')`, `wlopm --on`). With `wakeOnInput`, key presses, clicks,
+  pointer motion, scrolling and touch wake it. Releasing a key does not, so the
+  binding that switched the panels off does not switch them straight back on.
+  Pressing a `'toggle'` binding while its panels are off just wakes them.
+- Switching to another VT and back switches every output on, so an idle daemon
+  that crashed cannot leave you in front of dark screens.
+- Unplugging or disabling an output forgets its power state; it comes back on
+  when it returns.
+- While a panel is off nothing is rendered for it. Clients on it still get a
+  frame callback once a second so they do not stall. Screenshots and
+  screencasts of that output fail until it is back on (the screencast portal
+  retries).
+
 ## Reading output state
 
 The controller is also a read-only view, useful inside event handlers and the
@@ -179,6 +233,7 @@ composition function.
 | `availableModes(name)` | `OutputMode[]` reported by the driver |
 | `configure(factory)` | register a layout factory (above) |
 | `reconfigure()` | re-run all registered factories now |
+| `setPower(power, options?)` | switch panels on or off (above) |
 
 `OutputInfo` includes `name`, `enabled`, `resolution` (`{width, height,
 refreshRate}`), `position` (`{x, y}`), `scale`, `transform`, `subpixel`,

@@ -7,6 +7,7 @@ import {
   op_shoji_remove_unix_socket,
   op_shoji_ipc_listen,
   op_shoji_wake_compositor,
+  op_shoji_output_power,
 } from "ext:core/ops";
 
 globalThis.ShojiRuntimeBridge = ShojiRuntimeBridge;
@@ -15,6 +16,7 @@ globalThis.__SHOJI_PATH_EXISTS__ = op_shoji_path_exists;
 globalThis.__SHOJI_REMOVE_UNIX_SOCKET__ = op_shoji_remove_unix_socket;
 globalThis.__SHOJI_IPC_LISTEN__ = op_shoji_ipc_listen;
 globalThis.__SHOJI_WAKE_COMPOSITOR__ = op_shoji_wake_compositor;
+globalThis.__SHOJI_OUTPUT_POWER__ = op_shoji_output_power;
 
 const environment = new Map(Object.entries(op_shoji_environment()));
 const env = {

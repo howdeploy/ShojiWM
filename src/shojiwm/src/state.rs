@@ -281,6 +281,9 @@ pub struct ShojiWM {
     pub fractional_scale_manager_state: FractionalScaleManagerState,
     pub screencopy_state: crate::protocols::screencopy::ScreencopyManagerState,
     pub tearing_control_state: crate::protocols::tearing_control::TearingControlManagerState,
+    pub output_power_manager_state: crate::protocols::output_power::OutputPowerManagerState,
+    /// Outputs whose panel is switched off (DPMS), by name; see [`crate::output_power`].
+    pub powered_off_outputs: HashMap<String, crate::output_power::PoweredOffOutput>,
     pub foreign_toplevel_list_state:
         smithay::wayland::foreign_toplevel_list::ForeignToplevelListState,
     pub wlr_foreign_toplevel_manager_state:
@@ -403,6 +406,7 @@ pub struct ShojiWM {
     pub runtime_active_keyboard_device: Option<RuntimeInputDeviceSnapshot>,
     pub runtime_input_devices: BTreeMap<String, RuntimeInputDeviceSnapshot>,
     pub runtime_libinput_devices: HashMap<String, input::Device>,
+    pub keyboard_sources: HashMap<String, smithay::input::keyboard::KeyboardSource>,
     pub runtime_pointer_move_enabled: bool,
     pub runtime_pointer_move_async_enabled: bool,
     pub runtime_gesture_swipe_enabled: bool,
@@ -480,8 +484,12 @@ pub struct ShojiWM {
     /// `window.focus()` the config issues from a key binding, which is
     /// dispatched from inside that call — is traceable to the user.
     pub user_input_in_flight: bool,
+    /// The input event being processed switched outputs back on (`wake_on_input`). A toggle
+    /// requested by that same event (its key binding) must not switch them straight off again.
+    pub input_woke_outputs: bool,
     pub mapped_on_demand_layer_surfaces: HashSet<u32>,
     pub force_full_damage: bool,
+    pub full_damage_pending_outputs: HashSet<String>,
     pub debug_previous_scene_signatures: HashMap<String, Vec<String>>,
     pub tty_maintenance_pending: bool,
     pub tty_maintenance_reasons: BTreeSet<&'static str>,
@@ -1043,6 +1051,28 @@ impl ShojiWM {
         self.note_window_user_input(&window);
     }
 
+    /// A dialog opened by a background window must not take the user's seat.
+    pub(crate) fn background_parent_blocks_focus(&self, window: &Window) -> bool {
+        let Some(active) = self
+            .seat
+            .get_keyboard()
+            .and_then(|keyboard| keyboard.current_focus())
+            .or_else(|| self.activated_window_surface())
+        else {
+            return false;
+        };
+        if self.surface_belongs_to_window(window, &active) {
+            return false;
+        }
+        let Some(parent_id) = self.snapshot_window(window).parent_id else {
+            return false;
+        };
+        self.space.elements().any(|parent| {
+            self.snapshot_window(parent).id == parent_id
+                && !self.surface_belongs_to_window(parent, &active)
+        })
+    }
+
     /// Whether an *automatic* focus grant for `window` — one the user did not
     /// ask for: a window's own open-time `focus()`, an xdg-activation, an
     /// `_NET_ACTIVE_WINDOW` request — must give way to whoever currently holds
@@ -1461,6 +1491,8 @@ impl ShojiWM {
             crate::protocols::screencopy::ScreencopyManagerState::new::<Self, _>(&dh, |_| true);
         let tearing_control_state =
             crate::protocols::tearing_control::TearingControlManagerState::new::<Self>(&dh);
+        let output_power_manager_state =
+            crate::protocols::output_power::OutputPowerManagerState::new::<Self>(&dh);
         let foreign_toplevel_list_state =
             smithay::wayland::foreign_toplevel_list::ForeignToplevelListState::new::<Self>(&dh);
         let wlr_foreign_toplevel_manager_state =
@@ -1652,6 +1684,8 @@ impl ShojiWM {
             fractional_scale_manager_state,
             screencopy_state,
             tearing_control_state,
+            output_power_manager_state,
+            powered_off_outputs: HashMap::new(),
             foreign_toplevel_list_state,
             wlr_foreign_toplevel_manager_state,
             ext_workspace_manager_state,
@@ -1741,6 +1775,7 @@ impl ShojiWM {
             runtime_active_keyboard_device: None,
             runtime_input_devices: Default::default(),
             runtime_libinput_devices: Default::default(),
+            keyboard_sources: Default::default(),
             runtime_pointer_move_enabled: false,
             runtime_pointer_move_async_enabled: false,
             runtime_gesture_swipe_enabled: false,
@@ -1780,8 +1815,10 @@ impl ShojiWM {
             window_keyboard_focus: None,
             focus_chain: Vec::new(),
             user_input_in_flight: false,
+            input_woke_outputs: false,
             mapped_on_demand_layer_surfaces: Default::default(),
             force_full_damage,
+            full_damage_pending_outputs: HashSet::new(),
             debug_previous_scene_signatures: HashMap::new(),
             tty_maintenance_pending: true,
             tty_maintenance_reasons: BTreeSet::new(),
@@ -1869,6 +1906,7 @@ impl ShojiWM {
     }
 
     pub(crate) fn remove_output_global(&mut self, output: &Output) {
+        self.forget_output_power(output);
         let output_name = output.name();
         let Some(global) = self.runtime_output_globals.remove(&output_name) else {
             return;
@@ -2581,9 +2619,11 @@ impl ShojiWM {
             .handle()
             .insert_source(signals, |_event, _, state| {
                 state.record_event_source_wake("runtime-wake-signal");
+                state.apply_pending_output_power_requests();
                 state.tick_output_overlays();
                 state.schedule_output_overlay_tick();
                 let _ = state.tick_runtime_scheduler_with(true);
+                state.apply_pending_output_power_requests();
             });
         if let Err(error) = insert {
             warn!(?error, "failed to register runtime wake signal source");
@@ -3347,6 +3387,16 @@ impl ShojiWM {
 
     pub fn unregister_libinput_device(&mut self, mut device: input::Device) {
         let key = libinput_device_key(&mut device);
+        if let Some(source) = self.keyboard_sources.remove(&key)
+            && let Some(keyboard) = self.seat.get_keyboard()
+        {
+            keyboard.release_source(self, source);
+            self.current_keyboard_modifiers = keyboard.modifier_state();
+            self.tap_pressed_keys = keyboard.pressed_keys().len() as u32;
+            self.tap_armed_modifier = None;
+            self.tap_interrupted = true;
+            self.pending_tap_binding_ids.clear();
+        }
         if let Some(snapshot) = self.runtime_input_devices.get(&key)
             && self.runtime_active_keyboard_device.as_ref() == Some(snapshot)
         {
@@ -3925,7 +3975,7 @@ impl ShojiWM {
             return decoration.snapshot.app_id.as_deref() == Some("MateEngineX.x86_64");
         }
         self.raw_window_under(logical_pos).is_some_and(|(window, _)|
-            self.snapshot_window(window).app_id.as_deref() == Some("MateEngineX.x86_64"))
+            crate::foreign_toplevel::read_title_app_id(window).1 == "MateEngineX.x86_64")
     }
 
     fn is_window_root_surface(window: &Window, surface: &WlSurface) -> bool {

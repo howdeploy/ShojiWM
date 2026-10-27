@@ -527,7 +527,7 @@ pub trait WlrForeignToplevelManagerHandler:
         &self,
         handle: &WlrForeignToplevelHandle,
     ) -> Option<WlrForeignToplevelHandle>;
-    fn wlr_foreign_toplevel_activate(&mut self, handle: &WlrForeignToplevelHandle);
+    fn wlr_foreign_toplevel_activate(&mut self, handle: &WlrForeignToplevelHandle, client: &Client);
     fn wlr_foreign_toplevel_close(&mut self, handle: &WlrForeignToplevelHandle);
     fn wlr_foreign_toplevel_set_maximized(
         &mut self,
@@ -634,7 +634,7 @@ where
 {
     fn request(
         state: &mut D,
-        _client: &Client,
+        client: &Client,
         resource: &ZwlrForeignToplevelHandleV1,
         request: zwlr_foreign_toplevel_handle_v1::Request,
         handle: &WlrForeignToplevelHandle,
@@ -660,7 +660,7 @@ where
                 state.wlr_foreign_toplevel_set_minimized(handle, false);
             }
             zwlr_foreign_toplevel_handle_v1::Request::Activate { seat: _ } => {
-                state.wlr_foreign_toplevel_activate(handle);
+                state.wlr_foreign_toplevel_activate(handle, client);
             }
             zwlr_foreign_toplevel_handle_v1::Request::Close => {
                 state.wlr_foreign_toplevel_close(handle);
@@ -1003,10 +1003,25 @@ impl WlrForeignToplevelManagerHandler for ShojiWM {
             .handle_for_window_id(parent_id)
     }
 
-    fn wlr_foreign_toplevel_activate(&mut self, handle: &WlrForeignToplevelHandle) {
+    fn wlr_foreign_toplevel_activate(&mut self, handle: &WlrForeignToplevelHandle, client: &Client) {
         let Some(window) = self.wlr_foreign_toplevel_window(handle) else {
             return;
         };
+        let desktop_control = self.space.outputs().any(|output| {
+            smithay::desktop::layer_map_for_output(output)
+                .layers()
+                .any(|layer| {
+                    layer
+                        .layer_surface()
+                        .wl_surface()
+                        .client()
+                        .is_some_and(|owner| owner.id() == client.id())
+                })
+        });
+        if !desktop_control {
+            tracing::info!("blocked foreign-toplevel activation from non-panel client");
+            return;
+        }
         // Picking a window out of a taskbar is the user choosing it, even
         // though the click itself landed on the panel rather than on the window
         // — the input layer cannot attribute it. Record it so a later successor

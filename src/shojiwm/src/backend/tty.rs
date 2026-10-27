@@ -1082,6 +1082,13 @@ struct SurfaceData {
     /// cursor fast path patches the staged frame instead of committing.
     deferred_submit: Option<DeferredSubmit>,
     deferred_submit_generation: u64,
+    /// DPMS off (see `crate::output_power`): nothing renders or commits on this surface.
+    powered_off: bool,
+    /// Whether the CRTC of a powered-off surface has been disabled yet. A flip that was in
+    /// flight at power-off completes first; `frame_finish` disables the CRTC then.
+    power_cleared: bool,
+    /// Bumped on every power change; retires the powered-off frame callback timer.
+    power_generation: u64,
     dmabuf_feedback: SurfaceDmabufFeedback,
 }
 
@@ -1114,6 +1121,9 @@ pub fn resume_tty_session(state: &mut ShojiWM) {
             reset_surface_after_tty_resume(surface);
         }
     }
+    // Coming back to this VT means someone is at the screen, and whoever powered the outputs
+    // off (an idle daemon) may be gone by now: never leave the user in front of a dark panel.
+    state.power_on_all_outputs();
     // Connector changes that arrived while the session was paused were
     // deferred (scanning a paused device half-applies them and leaves stale
     // output state); re-run them now that the devices accept commits again.
@@ -1166,7 +1176,7 @@ pub fn resume_tty_session(state: &mut ShojiWM) {
     }
     retry_pending_connectors(state);
 
-    state.force_full_damage = true;
+    state.request_full_damage();
     state.request_tty_maintenance("tty-session-resume");
     state.schedule_redraw();
 }
@@ -1259,6 +1269,120 @@ fn reset_surface_after_tty_pause(surface: &mut SurfaceData) {
 fn reset_surface_after_tty_resume(surface: &mut SurfaceData) {
     reset_surface_after_tty_pause(surface);
     surface.redraw_state = TtyRedrawState::Queued;
+}
+
+/// How often clients on a powered-off output still get frame callbacks. Nothing renders
+/// there, so without these a client that paces itself on frame callbacks would stall until
+/// power-on; the same throttle invisible surfaces get keeps them alive at almost no cost.
+const POWERED_OFF_FRAME_CALLBACK_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Bring every surface in line with `state.powered_off_outputs` (see `crate::output_power`).
+/// Switching off disables the CRTC (DPMS off) and stops rendering; switching on renders a
+/// full frame, which re-enables the CRTC.
+pub fn sync_output_power(state: &mut ShojiWM) {
+    let session_active = state.tty_session_active;
+    let mut powered_off = Vec::new();
+    let mut powered_on = Vec::new();
+    for (node, backend) in state.tty_backends.iter_mut() {
+        for (crtc, surface) in backend.surfaces.iter_mut() {
+            let off = state.powered_off_outputs.contains_key(&surface.output.name());
+            if off == surface.powered_off {
+                continue;
+            }
+            surface.powered_off = off;
+            surface.power_generation = surface.power_generation.wrapping_add(1);
+            if off {
+                power_off_surface(surface, session_active);
+                powered_off.push((*node, *crtc, surface.power_generation));
+            } else {
+                power_on_surface(surface);
+                powered_on.push(surface.output.name());
+            }
+        }
+    }
+    let loop_handle = state.loop_handle.clone();
+    for (node, crtc, generation) in powered_off {
+        schedule_powered_off_frame_callbacks(&loop_handle, node, crtc, generation);
+    }
+    if !powered_on.is_empty() {
+        // Shared damage was consumed by other outputs' renders while this one was dark.
+        state.full_damage_pending_outputs.extend(powered_on);
+        state.schedule_redraw();
+    }
+}
+
+fn power_off_surface(surface: &mut SurfaceData, session_active: bool) {
+    if surface.deferred_submit.take().is_some() {
+        // Staged for a deadline commit but never committed: nothing is in flight.
+        surface.deferred_submit_generation = surface.deferred_submit_generation.wrapping_add(1);
+        surface.frame_pending = false;
+    }
+    surface.cursor_on_plane = false;
+    surface.cursor_move_pending = false;
+    surface.tearing_active = false;
+    surface.queued_at = None;
+    surface.next_frame_target = None;
+    surface.power_cleared = false;
+    if surface.frame_pending {
+        // Disabling the CRTC under an in-flight flip would race it; `frame_finish` does it.
+        return;
+    }
+    surface.redraw_state = TtyRedrawState::Idle;
+    // While the session is paused there is no DRM access; resuming switches outputs on anyway.
+    if session_active {
+        clear_powered_off_surface(surface);
+    }
+}
+
+fn clear_powered_off_surface(surface: &mut SurfaceData) {
+    surface.power_cleared = true;
+    if let Err(err) = surface.drm_output.with_compositor(|compositor| compositor.clear()) {
+        warn!(output = %surface.output.name(), ?err, "failed to switch output off");
+    }
+    // Nothing scans these out any more.
+    surface.held_client_buffers.clear();
+}
+
+fn power_on_surface(surface: &mut SurfaceData) {
+    surface.power_cleared = false;
+    // The swapchain contents predate the dark period; render the first frame from scratch.
+    surface.drm_output.reset_buffers();
+    surface.redraw_state = if surface.frame_pending {
+        TtyRedrawState::WaitingForVBlank { redraw_needed: true }
+    } else {
+        TtyRedrawState::Queued
+    };
+}
+
+fn schedule_powered_off_frame_callbacks(
+    loop_handle: &LoopHandle<'static, ShojiWM>,
+    node: DrmNode,
+    crtc: crtc::Handle,
+    generation: u64,
+) {
+    let timer = Timer::from_duration(POWERED_OFF_FRAME_CALLBACK_INTERVAL);
+    let inserted = loop_handle.insert_source(timer, move |_, _, state| {
+        let Some(surface) = state
+            .tty_backends
+            .get_mut(&node)
+            .and_then(|backend| backend.surfaces.get_mut(&crtc))
+        else {
+            return TimeoutAction::Drop;
+        };
+        if !surface.powered_off || surface.power_generation != generation {
+            return TimeoutAction::Drop;
+        }
+        surface.frame_callback_sequence = surface.frame_callback_sequence.wrapping_add(1);
+        let sequence = surface.frame_callback_sequence;
+        let output = surface.output.clone();
+        let now = Duration::from(state.clock.now());
+        state.send_primary_frame_callbacks_for_output(&output, now, Some(sequence));
+        let _ = state.display_handle.flush_clients();
+        TimeoutAction::ToDuration(POWERED_OFF_FRAME_CALLBACK_INTERVAL)
+    });
+    if inserted.is_err() {
+        warn!(?node, ?crtc, "failed to schedule powered-off frame callbacks");
+    }
 }
 
 enum RenderSurfaceOutcome {
@@ -1893,6 +2017,17 @@ fn frame_finish(
     surface.queued_at = None;
     surface.queued_cpu_duration = Duration::ZERO;
     surface.skipped_while_pending_count = 0;
+    if surface.powered_off {
+        // The flip that was in flight at power-off is done; the CRTC can go dark now. No
+        // follow-up render: the powered-off frame callback timer keeps clients going.
+        surface.redraw_state = TtyRedrawState::Idle;
+        surface.next_frame_target = None;
+        surface.cursor_move_pending = false;
+        if !surface.power_cleared {
+            clear_powered_off_surface(surface);
+        }
+        return;
+    }
     let redraw_needed = match surface.redraw_state {
         TtyRedrawState::WaitingForVBlank { redraw_needed } => redraw_needed,
         _ => false,
@@ -2254,7 +2389,7 @@ fn fast_cursor_move_inner(
     // Only when the last real render actually put the cursor on the DRM
     // cursor plane, and never while the tearing path is active (async flips
     // reject commits that touch anything but the primary plane).
-    if !surface.cursor_on_plane || surface.tearing_active {
+    if !surface.cursor_on_plane || surface.tearing_active || surface.powered_off {
         return false;
     }
     // While an estimated-vblank timer stands in for a real vblank a fast
@@ -3048,7 +3183,7 @@ fn queue_tty_redraws(state: &mut ShojiWM) {
         .collect::<std::collections::HashSet<_>>();
     for backend in state.tty_backends.values_mut() {
         for surface in backend.surfaces.values_mut() {
-            if !renderable_outputs.contains(&surface.output.name()) {
+            if surface.powered_off || !renderable_outputs.contains(&surface.output.name()) {
                 if !surface.frame_pending {
                     surface.redraw_state = TtyRedrawState::Idle;
                     surface.queued_at = None;
@@ -3250,14 +3385,18 @@ fn render_surface(
     });
     timescope::scope!("tty render_surface");
     let spike_threshold_ms = animation_spike_threshold_ms();
-    let Some(output) = state
+    let Some((output, powered_off)) = state
         .tty_backends
         .get(&node)
         .and_then(|backend| backend.surfaces.get(&crtc))
-        .map(|surface| surface.output.clone())
+        .map(|surface| (surface.output.clone(), surface.powered_off))
     else {
         return Ok(RenderSurfaceOutcome::Skipped);
     };
+    // A powered-off panel must stay dark: `queue_frame` would switch it back on.
+    if powered_off {
+        return Ok(RenderSurfaceOutcome::Skipped);
+    }
     if !state.runtime_output_render_enabled(&output.name())
         || state.space.output_geometry(&output).is_none()
     {
@@ -3514,7 +3653,7 @@ fn render_surface(
                 "transform snapshot tty pending decoration damage at render start"
             );
         }
-        if state.force_full_damage {
+        if state.take_full_damage(&output.name()) {
             extra_damage.push(crate::ssd::LogicalRect::new(
                 output_geo.loc.x,
                 output_geo.loc.y,
@@ -13833,6 +13972,9 @@ fn connector_connected(
         cursor_margin_window_misses: 0,
         deferred_submit: None,
         deferred_submit_generation: 0,
+        powered_off: false,
+        power_cleared: false,
+        power_generation: 0,
         dmabuf_feedback,
     };
     backend.surfaces.insert(crtc, surface);
@@ -14071,7 +14213,7 @@ fn reset_surface_after_commit_failure(
             "failed to reconnect output after surface reset",
         );
     }
-    state.force_full_damage = true;
+    state.request_full_damage();
     state
         .schedule_redraw();
     Ok(())
@@ -14153,6 +14295,12 @@ pub fn apply_tty_output_mode(
                     &DrmOutputRenderElements::default(),
                 )?;
             surface.frame_duration = Duration::from_secs_f64(1_000f64 / mode.refresh as f64);
+            if surface.powered_off {
+                if !surface.frame_pending {
+                    clear_powered_off_surface(surface);
+                }
+                return Ok(true);
+            }
             surface.redraw_state = TtyRedrawState::Queued;
             return Ok(true);
         }

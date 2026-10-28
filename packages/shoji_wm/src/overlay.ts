@@ -13,8 +13,10 @@ export interface OverlayEffectHandle {
 
 export interface OverlayOptions {
   effect: OverlayEffectHandle;
-  /** `below-layers` is above windows but below Top/Overlay layer-shell surfaces. */
-  placement?: "top" | "below-layers";
+  /** `below-layers` is above windows but below Top/Overlay layer-shell surfaces.
+   * `unlock` prepares a lock-frame snapshot; nonpersistent, maximum 3000ms.
+   * Keep progress zero until the session-lock protocol has actually unlocked. */
+  placement?: "top" | "below-layers" | "unlock";
   /** Remain active after the first frame until disposed or lifecycle cleanup. */
   persistent?: boolean;
   /** Deadline in milliseconds; persistent overlays only bound the first frame. */

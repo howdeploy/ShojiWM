@@ -40,6 +40,7 @@ pub(crate) struct Control {
     owner: Arc<AtomicBool>,
     persistent: bool,
     snapshot: bool,
+    unlock: bool,
     state: Mutex<ControlState>,
     changed: Notify,
 }
@@ -92,8 +93,14 @@ pub(crate) fn create(owner: &Arc<AtomicBool>, output: String, placement: String,
     {
         return Err(io::Error::other("Invalid output overlay request or inactive runtime"));
     }
+    let unlock = placement == "unlock";
+    if unlock && (!super::lock_scene::is_locked() || persistent || duration > 3000.0
+        || !uses_snapshot(&effect)) {
+        return Err(io::Error::other("Unlock overlay requires a locked session, a snapshot and a deadline <= 3000ms"));
+    }
     let placement = match placement.as_str() {
         "top" => Placement::Top,
+        "unlock" => Placement::Top,
         "below-layers" => Placement::BelowLayers,
         _ => return Err(io::Error::other("Unknown output overlay placement")),
     };
@@ -105,6 +112,7 @@ pub(crate) fn create(owner: &Arc<AtomicBool>, output: String, placement: String,
         id, output, placement, owner: owner.clone(),
         persistent,
         snapshot: uses_snapshot(&effect),
+        unlock,
         state: Mutex::new(ControlState {
             effect: Arc::new(effect), revision: 1, ready: false, closed: None,
             deadline: Some(Instant::now() + Duration::from_secs_f64(duration / 1000.0)),
@@ -275,7 +283,9 @@ impl OutputOverlays {
     pub(crate) fn tick(&mut self, outputs: &[Output], locked: bool) -> bool {
         let mut registry = controls().lock().unwrap();
         for control in registry.values() {
-            if locked { control.close("Session unavailable"); }
+            if locked && !(control.unlock && super::lock_scene::is_locked()) {
+                control.close("Session unavailable");
+            }
             if !outputs.iter().any(|output| output.name() == control.output) {
                 control.close("Output removed or disabled");
             }
@@ -301,7 +311,8 @@ impl OutputOverlays {
         wrap: impl Fn(TextureRenderElement<GlesTexture>) -> E,
     ) {
         let pending: Vec<_> = controls().lock().unwrap().values()
-            .filter(|c| c.output == output.name() && c.alive()).cloned().collect();
+            .filter(|c| c.output == output.name() && c.alive()
+                && (!super::lock_scene::is_locked() || c.unlock)).cloned().collect();
         // Front-to-back scene: compose the lower slot first so the top sees its result.
         for (placement, index) in [(Placement::BelowLayers, below_layers), (Placement::Top, 0)] {
             let key = (output.name(), placement);

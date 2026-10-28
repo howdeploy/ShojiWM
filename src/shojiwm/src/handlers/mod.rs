@@ -241,6 +241,7 @@ impl SessionLockHandler for ShojiWM {
         crate::backend::overlay::close_all("Session locked");
         self.output_overlays.clear();
         self.session_lock_active = true;
+        crate::backend::lock_scene::set_locked(true);
         self.layer_shell_on_demand_focus = None;
         // Park the focus owner rather than dropping it: `unlock` restores it.
         // Taken directly instead of through
@@ -261,6 +262,7 @@ impl SessionLockHandler for ShojiWM {
 
     fn unlock(&mut self) {
         self.session_lock_active = false;
+        crate::backend::lock_scene::set_locked(false);
         self.session_lock_surfaces.clear();
         self.pointer_contents = crate::state::PointerContents::default();
         if let Some(keyboard) = self.seat.get_keyboard() {

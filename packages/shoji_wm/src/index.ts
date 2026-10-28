@@ -1,4 +1,7 @@
 /// <reference path="./runtime-globals.d.ts" />
+import { configureLockBackground } from "./session-lock";
+export { configureLockBackground, installSessionLockBridge } from "./session-lock";
+export type { LockBackgroundSelection } from "./session-lock";
 import type {
   AppIconProps,
   ImageProps,
@@ -930,6 +933,7 @@ function createCompositorDefinition(): CompositorDefinition {
     },
     rendering: {},
     output: OUTPUT_CONTROLLER,
+    session: { configureLockBackground },
     workspace: WORKSPACE_CONTROLLER,
     env: ENV_CONTROLLER,
     process: PROCESS_CONTROLLER,

@@ -2632,8 +2632,11 @@ impl ShojiWM {
 
     fn tick_output_overlays(&mut self) -> u64 {
         let outputs: Vec<_> = self.space.outputs()
-            .filter(|output| self.runtime_output_render_enabled(&output.name())).cloned().collect();
+            .filter(|output| self.output_capturable(&output.name())).cloned().collect();
         let unavailable = self.session_lock_active || (!self.tty_backends.is_empty() && !self.tty_session_active);
+        if !self.tty_backends.is_empty() && !self.tty_session_active {
+            crate::backend::overlay::close_all("Session paused");
+        }
         if self.output_overlays.tick(&outputs, unavailable) {
             self.schedule_redraw();
             self.runtime_frame_sync_interval_ms().min(crate::backend::overlay::deadline_interval_ms())

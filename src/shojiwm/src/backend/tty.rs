@@ -1780,6 +1780,14 @@ fn collect_client_buffers_for_hold(
     for window in windows {
         window.with_surfaces(|_, states| hold(states));
     }
+    if state.session_lock_active && state.session_lock_surface_for_output(output).as_ref()
+        .is_some_and(crate::backend::lock_scene::locker_ready) {
+        for window in state.space.elements().filter(|window|
+            !windows.contains(window) && state.space.outputs_for_element(window).contains(output)
+                && crate::backend::lock_scene::window_selected(window)) {
+            window.with_surfaces(|_, states| hold(states));
+        }
+    }
     for layer in layer_map_for_output(output).layers() {
         layer.with_surfaces(|_, states| hold(states));
     }
@@ -3688,6 +3696,7 @@ fn render_surface(
     // Taken before the render so it names exactly the buffers this frame will sample (commits
     // cannot land in between: the loop is single-threaded). Stored on the surface once the
     // frame is actually submitted; see `SurfaceData::held_client_buffers`.
+    crate::backend::lock_scene::apply_pending();
     let held_client_buffers =
         collect_client_buffers_for_hold(
             state,
@@ -6795,6 +6804,13 @@ fn render_surface(
         }
         overlay_below_layers += content_elements.len();
         content_elements.extend(scene_elements);
+        if state.session_lock_active {
+            content_elements = if session_lock_surface_for_output.as_ref().is_some_and(crate::backend::lock_scene::locker_ready) {
+                crate::backend::lock_scene::background_elements(
+                    &mut backend.renderer, space, window_decorations, &output, scale,
+                ).into_iter().map(TtyRenderElements::Window).collect()
+            } else { Vec::new() };
+        }
 
         let cursor_status_for_log = cursor_override
             .map(CursorImageStatus::Named)
@@ -6839,10 +6855,11 @@ fn render_surface(
                 }
             }
         }
-        if !state.session_lock_active {
+        if !state.session_lock_active || session_lock_surface_for_output.as_ref()
+            .is_some_and(crate::backend::lock_scene::locker_ready) {
             state.output_overlays.render(&mut backend.renderer, &output,
                 (output_geo.size.w, output_geo.size.h), scale, &mut content_for_capture,
-                overlay_below_layers, TtyRenderElements::Snapshot);
+                if state.session_lock_active { 0 } else { overlay_below_layers }, TtyRenderElements::Snapshot);
         }
         // The element count for diagnostics — final elements is built below
         // after capture has run against the by-reference slices.

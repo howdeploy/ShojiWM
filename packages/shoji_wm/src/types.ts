@@ -2318,6 +2318,8 @@ export interface CompositorDefinition {
    */
   onDisable(listener: import("./events").RuntimeDisableListener): () => void;
   preload: PreloadController;
+  /** Explicit runtime-owned roots behind transparent session-lock surfaces. */
+  session: { configureLockBackground: typeof import("./session-lock").configureLockBackground };
   /**
    * Scene-graph effect assignments: background, per-window, per-layer, per-popup.
    * シーングラフのエフェクト設定。背景・ウィンドウごと・レイヤーごと・ポップアップごと。

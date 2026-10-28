@@ -1096,6 +1096,15 @@ impl ShojiRuntimeBridge {
         })
     }
 
+    fn configure_lock_background(&self, #[serde] background: crate::backend::lock_scene::BackgroundSelection)
+        -> Result<bool, std::io::Error>
+    {
+        if crate::backend::lock_scene::configure(&self.overlay_owner, background)? {
+            crate::ssd::wake_compositor();
+        }
+        Ok(crate::backend::lock_scene::is_locked())
+    }
+
     fn create_overlay(&self, #[string] output: String, #[string] placement: String,
         max_duration: f64, #[serde] effect: super::bridge::WireCompiledEffect, persistent: bool) -> Result<u32, std::io::Error>
     {

@@ -26,6 +26,45 @@ use zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1;
 
 const VERSION: u32 = 3;
 
+pub(crate) fn screencopy_shm_buffer_range(
+    pool_len: usize,
+    buffer_data: shm::BufferData,
+    size: Size<i32, Physical>,
+) -> Option<std::ops::Range<usize>> {
+    let expected_stride = size.w.checked_mul(4)?;
+    let offset = usize::try_from(buffer_data.offset).ok()?;
+    let stride = usize::try_from(buffer_data.stride).ok()?;
+    let height = usize::try_from(buffer_data.height).ok()?;
+    let end = offset.checked_add(stride.checked_mul(height)?)?;
+    (size.w > 0 && size.h > 0
+        && buffer_data.format == Format::Xrgb8888
+        && buffer_data.width == size.w
+        && buffer_data.height == size.h
+        && buffer_data.stride == expected_stride
+        && end <= pool_len).then_some(offset..end)
+}
+
+#[cfg(test)]
+mod shm_range_tests {
+    use super::*;
+
+    #[test]
+    fn shared_pool_offsets_are_validated_before_copying() {
+        let data = |offset| shm::BufferData {
+            offset, width: 64, height: 64, stride: 256, format: Format::Xrgb8888,
+        };
+        let size = Size::from((64, 64));
+        assert_eq!(screencopy_shm_buffer_range(16448, data(64), size), Some(64..16448));
+        assert_eq!(screencopy_shm_buffer_range(32768, data(0), size), Some(0..16384));
+        assert_eq!(screencopy_shm_buffer_range(16447, data(64), size), None);
+        assert_eq!(screencopy_shm_buffer_range(16384, data(-1), size), None);
+        assert_eq!(screencopy_shm_buffer_range(0, data(0), Size::from((0, 0))), None);
+        let mut wrong = data(0);
+        wrong.stride += 4;
+        assert_eq!(screencopy_shm_buffer_range(32768, wrong, size), None);
+    }
+}
+
 pub struct ScreencopyQueue {
     damage_tracker: OutputDamageTracker,
     pending_frames: HashSet<ZwlrScreencopyFrameV1>,
@@ -495,12 +534,8 @@ where
                 );
                 return;
             }
-        } else if shm::with_buffer_contents(&buffer, |_, shm_len, buffer_data| {
-            buffer_data.format == Format::Xrgb8888
-                && buffer_data.width == size.w
-                && buffer_data.height == size.h
-                && buffer_data.stride == size.w * 4
-                && shm_len == buffer_data.stride as usize * buffer_data.height as usize
+        } else if shm::with_buffer_contents(&buffer, |_, pool_len, buffer_data| {
+            screencopy_shm_buffer_range(pool_len, buffer_data, size).is_some()
         })
         .unwrap_or(false)
         {

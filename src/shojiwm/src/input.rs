@@ -528,6 +528,11 @@ impl ShojiWM {
         }
 
         match event {
+            InputEvent::DeviceRemoved { device } => {
+                let device_id = device.id();
+                self.consumed_pointer_buttons
+                    .retain(|(id, _)| id != &device_id);
+            }
             InputEvent::Keyboard { event, .. } => {
                 let device = event.device();
                 let source = *self
@@ -965,6 +970,17 @@ impl ShojiWM {
 
                 let button_state = event.state();
 
+                let button_key = (event.device().id(), button);
+                // Never forward a release whose press was consumed by a shortcut.
+                if button_state == ButtonState::Released
+                    && self.consumed_pointer_buttons.remove(&button_key)
+                {
+                    return;
+                }
+                if self.consumed_pointer_buttons.contains(&button_key) {
+                    return;
+                }
+
                 // A pointer button press cancels a pending modifier tap (e.g. Super+drag).
                 if matches!(button_state, ButtonState::Pressed) {
                     self.tap_interrupted = true;
@@ -997,6 +1013,22 @@ impl ShojiWM {
                         event.time_msec(),
                     );
                     return;
+                }
+
+                if button_state == ButtonState::Pressed {
+                    let binding_id = self
+                        .runtime_key_bindings
+                        .iter()
+                        .find(|binding| {
+                            binding.matches_mouse_button(button, &self.current_keyboard_modifiers)
+                        })
+                        .map(|binding| binding.id.clone());
+                    if let Some(binding_id) = binding_id {
+                        self.tap_interrupted = true;
+                        self.consumed_pointer_buttons.insert(button_key);
+                        self.run_runtime_key_binding(&binding_id);
+                        return;
+                    }
                 }
 
                 // A locked-pointer client already owns pointer focus. Re-running compositor hit

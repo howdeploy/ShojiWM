@@ -71,7 +71,7 @@ fn mark_toplevel_metadata_dirty(
         .window_decorations
         .get(&window)
         .map(|cached| &cached.snapshot);
-    info!(
+    debug!(
         window_id = %snapshot.id,
         title = %snapshot.title,
         cached_title = ?cached_snapshot.map(|snapshot| snapshot.title.as_str()),
@@ -81,9 +81,16 @@ fn mark_toplevel_metadata_dirty(
         "xdg toplevel metadata changed"
     );
 
+    // Title signals still rebuild title-dependent composition; reuse its native cache.
+    let title_only = cached_snapshot.is_some_and(|previous|
+        previous.title != snapshot.title && previous.app_id == snapshot.app_id);
+    if !state.runtime_dirty_window_ids.contains(&snapshot.id) && title_only {
+        state.runtime_node_only_window_ids.insert(snapshot.id.clone());
+    } else if !title_only {
+        state.runtime_node_only_window_ids.remove(&snapshot.id);
+    }
     state.runtime_dirty_window_ids.insert(snapshot.id.clone());
     state.runtime_managed_only_window_ids.remove(&snapshot.id);
-    state.runtime_node_only_window_ids.remove(&snapshot.id);
     state.runtime_poll_dirty = true;
     state.request_tty_maintenance(reason);
     state.schedule_redraw();

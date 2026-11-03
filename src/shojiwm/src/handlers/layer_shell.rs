@@ -23,6 +23,27 @@ use tracing::{debug, info};
 
 use crate::state::{PendingLayerSurface, ShojiWM};
 
+struct LayerCommitState {
+    layout: smithay::wayland::shell::wlr_layer::LayerSurfaceCachedState,
+    geometry: Rectangle<i32, Logical>,
+    mapped: bool,
+    input: Option<Vec<(bool, Rectangle<i32, Logical>)>>,
+}
+
+fn same_layer_layout(a: &LayerCommitState, b: &LayerCommitState) -> bool {
+    let a_layout = &a.layout;
+    let b_layout = &b.layout;
+    a.geometry == b.geometry && a.mapped == b.mapped
+        && a_layout.size == b_layout.size && a_layout.anchor == b_layout.anchor
+        && a_layout.exclusive_zone == b_layout.exclusive_zone
+        && a_layout.exclusive_edge == b_layout.exclusive_edge
+        && a_layout.layer == b_layout.layer
+        && a_layout.margin.top == b_layout.margin.top
+        && a_layout.margin.bottom == b_layout.margin.bottom
+        && a_layout.margin.left == b_layout.margin.left
+        && a_layout.margin.right == b_layout.margin.right
+}
+
 fn layer_focus_debug_enabled() -> bool {
     crate::env_flag!("SHOJI_LAYER_FOCUS_DEBUG")
 }
@@ -203,7 +224,30 @@ pub fn handle_commit(state: &mut ShojiWM, surface: &WlSurface, damage: LayerComm
     });
 
     let mut map = layer_map_for_output(&output);
-    map.arrange();
+    let mut focus_changed = false;
+    if let Some(layer) = map.layer_for_surface(&root, WindowSurfaceType::TOPLEVEL).cloned() {
+        let next = LayerCommitState {
+            layout: layer.cached_state(),
+            geometry: layer.geometry(),
+            mapped: crate::backend::window::layer_surface_is_mapped(&layer),
+            input: with_states(&root, |states| {
+                states.cached_state.get::<SurfaceAttributes>().current().input_region.as_ref().map(|input|
+                    input.rects.iter().map(|(kind, rect)|
+                        (matches!(kind, smithay::wayland::compositor::RectangleKind::Add), *rect)).collect())
+            }),
+        };
+        layer.user_data().insert_if_missing(|| std::sync::Mutex::new(None::<LayerCommitState>));
+        let mut previous = layer.user_data().get::<std::sync::Mutex<Option<LayerCommitState>>>().unwrap().lock().unwrap();
+        let layout_changed = previous.as_ref().is_none_or(|old| !same_layer_layout(old, &next));
+        focus_changed = layout_changed || surface != &root || previous.as_ref().is_none_or(|old|
+            old.layout.keyboard_interactivity != next.layout.keyboard_interactivity
+            || old.input != next.input);
+        *previous = Some(next);
+        drop(previous);
+        if layout_changed || !initial_configure_sent {
+            map.arrange();
+        }
+    }
 
     if let Some(layer) = map.layer_for_surface(&root, WindowSurfaceType::TOPLEVEL) {
         if !initial_configure_sent {
@@ -283,7 +327,7 @@ pub fn handle_commit(state: &mut ShojiWM, surface: &WlSurface, damage: LayerComm
 
         let surface_id = layer.wl_surface().id().protocol_id();
         let keyboard_interactivity = layer.cached_state().keyboard_interactivity;
-        let is_mapped = layer_geo.is_some();
+        let is_mapped = layer_geo.is_some() && crate::backend::window::layer_surface_is_mapped(layer);
         let was_mapped = state.mapped_on_demand_layer_surfaces.contains(&surface_id);
 
         if matches!(
@@ -322,9 +366,11 @@ pub fn handle_commit(state: &mut ShojiWM, surface: &WlSurface, damage: LayerComm
     }
 
     drop(map);
-    state.update_keyboard_focus(SERIAL_COUNTER.next_serial());
-    state.refresh_pointer_focus(std::time::Duration::from(state.clock.now()).as_millis() as u32);
-    state.schedule_redraw();
+    if focus_changed {
+        state.update_keyboard_focus(SERIAL_COUNTER.next_serial());
+        state.refresh_pointer_focus(std::time::Duration::from(state.clock.now()).as_millis() as u32);
+    }
+    state.schedule_output_redraw(&output.name());
 }
 
 fn layer_surface_id(surface: &WlSurface) -> u32 {
@@ -476,6 +522,31 @@ fn layer_source_damage_rects(
 #[cfg(test)]
 mod source_damage_tests {
     use super::*;
+
+    #[test]
+    fn content_and_input_commits_keep_layout_but_size_and_mapping_rearrange() {
+        let state = || LayerCommitState {
+            layout: Default::default(),
+            geometry: Rectangle::new((0, 0).into(), (480, 72).into()),
+            mapped: true,
+            input: None,
+        };
+        let previous = state();
+        let mut next = state();
+        assert!(same_layer_layout(&previous, &next));
+        next.input = Some(Vec::new());
+        assert!(same_layer_layout(&previous, &next));
+        next.layout.keyboard_interactivity = KeyboardInteractivity::Exclusive;
+        assert!(same_layer_layout(&previous, &next));
+        next.layout.margin.bottom = 12;
+        assert!(!same_layer_layout(&previous, &next));
+        next = state();
+        next.geometry.size.h = 80;
+        assert!(!same_layer_layout(&previous, &next));
+        next = state();
+        next.mapped = false;
+        assert!(!same_layer_layout(&previous, &next));
+    }
 
     fn layer() -> crate::ssd::LogicalRect {
         crate::ssd::LogicalRect::new(100, 0, 500, 800)

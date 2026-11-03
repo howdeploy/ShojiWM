@@ -1,5 +1,31 @@
 # KISA desktop compositor snapshot
 
+## November 3, 2026 update
+
+This update publishes the prepared November 2 refactor on top of `d78b72a`:
+
+- Preserve dirty marks raised during a decoration refresh and restore coherent
+  client-rectangle caches after animations.
+- Redraw the affected output for layer commits; arrange layout and update focus
+  when the corresponding state changes.
+- Refresh title-dependent composition through its native cache, with metadata
+  diagnostics at DEBUG level.
+- Validate screencopy shared-memory offsets and ranges while preserving other
+  buffers in the same pool.
+- Support `MouseBack` / `MouseForward` shortcuts, consuming matched releases and
+  preserving unmatched application input; include matching SDK declarations.
+- Describe vector-valued shader signals in the SDK types.
+
+The original preparation recorded a release build and 249 passing Rust tests
+(two ignored), plus a matching-SDK Deno check. These are historical checks of
+the prepared source, not new publication checks or graphical acceptance.
+No build, tests, compositor restart or memory measurements were run for this
+publication. The published configuration is a separate sanitized distribution;
+its integration and clean-machine runtime still need user validation.
+The existing session-lock background API and deadlock correction are retained.
+
+## October 27 baseline
+
 The fork's `main` branch preserves the current local KISA ShojiWM desktop
 source as of 2026-10-27, on top of upstream integration commit `dcea1dd` and
 the previous desktop snapshot `dcb73aa`. The installed reference package is

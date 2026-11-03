@@ -375,6 +375,8 @@ pub struct ShojiWM {
     pub damage_blink_capture_suppression: HashMap<String, u8>,
     pub runtime_poll_dirty: bool,
     pub runtime_dirty_window_ids: std::collections::HashSet<String>,
+    /// Re-marked windows must survive the refresh pass that is currently running.
+    pub runtime_dirty_marked_during_refresh: Option<std::collections::HashSet<String>>,
     pub runtime_managed_only_window_ids: std::collections::HashSet<String>,
     pub runtime_node_only_window_ids: std::collections::HashSet<String>,
     pub runtime_scheduler_enabled: bool,
@@ -413,6 +415,7 @@ pub struct ShojiWM {
     pub runtime_gesture_swipe_async_enabled: bool,
     pub runtime_gesture_swipe: Option<RuntimeGestureSwipeState>,
     pub current_keyboard_modifiers: ModifiersState,
+    pub consumed_pointer_buttons: HashSet<(String, u32)>,
     // Modifier-only tap detection (e.g. "Super"). If no other input occurs
     // between press and release, the release is treated as a tap.
     pub tap_pressed_keys: u32,
@@ -524,6 +527,8 @@ pub struct ShojiWM {
 
     pub is_running: bool,
     pub needs_redraw: bool,
+    pub redraw_all_outputs: bool,
+    pub pending_output_redraws: HashSet<String>,
     /// Pointer motion happened this dispatch cycle and nothing else damaged
     /// the frame: instead of a full render, try to move only the DRM cursor
     /// plane (see `backend::tty::try_fast_cursor_move`). `needs_redraw`
@@ -1748,6 +1753,7 @@ impl ShojiWM {
             damage_blink_capture_suppression: HashMap::new(),
             runtime_poll_dirty: false,
             runtime_dirty_window_ids: Default::default(),
+            runtime_dirty_marked_during_refresh: None,
             runtime_managed_only_window_ids: Default::default(),
             runtime_node_only_window_ids: Default::default(),
             runtime_scheduler_enabled: false,
@@ -1782,6 +1788,7 @@ impl ShojiWM {
             runtime_gesture_swipe_async_enabled: false,
             runtime_gesture_swipe: None,
             current_keyboard_modifiers: ModifiersState::default(),
+            consumed_pointer_buttons: HashSet::new(),
             tap_pressed_keys: 0,
             tap_armed_modifier: None,
             tap_interrupted: false,
@@ -1839,6 +1846,8 @@ impl ShojiWM {
 
             is_running: true,
             needs_redraw: true,
+            redraw_all_outputs: true,
+            pending_output_redraws: HashSet::new(),
             cursor_fast_move_pending: false,
             last_pointer_motion_at: None,
             pending_pointer_input: None,
@@ -3527,6 +3536,9 @@ impl ShojiWM {
                 self.runtime_managed_only_window_ids.remove(&window_id);
             }
             self.runtime_node_only_window_ids.remove(&window_id);
+            if let Some(marked) = &mut self.runtime_dirty_marked_during_refresh {
+                marked.insert(window_id.clone());
+            }
             self.runtime_dirty_window_ids.insert(window_id);
         }
     }
@@ -4482,6 +4494,7 @@ impl ShojiWM {
 
     #[track_caller]
     pub fn schedule_redraw(&mut self) {
+        self.redraw_all_outputs = true;
         let caller = std::panic::Location::caller();
         if std::env::var_os("SHOJI_REDRAW_STATS")
             .is_some_and(|value| value != "0" && !value.is_empty())
@@ -4542,6 +4555,11 @@ impl ShojiWM {
         // calls `schedule_redraw()` mid-render spins the loop at ~10k iter/sec and —
         // together with an unconditional `flush_clients()` — caused the Firefox CPU
         // regression.
+    }
+
+    pub fn schedule_output_redraw(&mut self, output_name: &str) {
+        self.pending_output_redraws.insert(output_name.to_owned());
+        self.needs_redraw = true;
     }
 
     pub fn note_xdg_popup_created(&mut self, surface_id: u32) {

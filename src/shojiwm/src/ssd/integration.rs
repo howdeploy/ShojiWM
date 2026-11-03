@@ -2920,6 +2920,7 @@ impl ShojiWM {
         let mut closing_runtime_updates = 0usize;
         let mut animation_active_for_target = false;
         let mut processed_runtime_dirty_window_ids = std::collections::HashSet::new();
+        self.runtime_dirty_marked_during_refresh = Some(Default::default());
         let mut managed_rect_apply_window_ids = std::collections::HashSet::new();
         let now_ms = Duration::from(self.clock.now()).as_millis() as u64;
         let closing_active_count = self.closing_window_snapshots.len();
@@ -3152,6 +3153,18 @@ impl ShojiWM {
                         .transpose()?
                         .unwrap_or(client_rect)
                 };
+                if let Some(cached) = self.window_decorations.get_mut(&window) {
+                    if client_rect_probe_agrees(
+                        cached.client_rect_potentially_stale,
+                        cached.managed_window_animation_active,
+                        cached.layout_scale,
+                        layout_scale,
+                        cached.client_rect,
+                        cached_effective_client_rect,
+                    ) {
+                        cached.client_rect_potentially_stale = false;
+                    }
+                }
                 let had_cached_decoration = {
                     timescope::scope!("ssd window cache lookup");
                     self.window_decorations.contains_key(&window)
@@ -3606,7 +3619,8 @@ impl ShojiWM {
                         let evaluate_started_at = Instant::now();
                         let mut evaluation = {
                             timescope::scope!("ssd window runtime evaluate");
-                            if runtime_state_changed && !force_full_cached_reevaluation {
+                            if runtime_state_changed && !force_full_cached_reevaluation
+                                && cached.snapshot.title == snapshot.title {
                                 match self.decoration_evaluator.evaluate_window(&snapshot, now_ms) {
                                     Ok(evaluation) => evaluation.into(),
                                     Err(error) => {
@@ -4987,7 +5001,11 @@ impl ShojiWM {
             elapsed_ms = refresh_elapsed_ms,
             "refresh_window_decorations finished"
         );
+        let marked_during_refresh = self.runtime_dirty_marked_during_refresh.take().unwrap_or_default();
         for window_id in processed_runtime_dirty_window_ids {
+            if marked_during_refresh.contains(&window_id) {
+                continue;
+            }
             self.runtime_dirty_window_ids.remove(&window_id);
             self.runtime_managed_only_window_ids.remove(&window_id);
             self.runtime_node_only_window_ids.remove(&window_id);
@@ -6186,6 +6204,18 @@ fn managed_client_rect_for_state(
     }
 
     managed_client_rect_for_root(tree, desired_root, scale)
+}
+
+fn client_rect_probe_agrees(
+    stale: bool,
+    animation_active: bool,
+    cached_scale: f64,
+    layout_scale: f64,
+    cached_client_rect: LogicalRect,
+    probed_client_rect: LogicalRect,
+) -> bool {
+    stale && !animation_active && cached_scale == layout_scale
+        && cached_client_rect == probed_client_rect
 }
 
 fn managed_client_rect_from_current_insets(
@@ -8978,7 +9008,6 @@ fn window_snapshot_requires_rebuild(
     next: &WaylandWindowSnapshot,
 ) -> bool {
     previous.id != next.id
-        || previous.title != next.title
         || previous.app_id != next.app_id
         || previous.is_floating != next.is_floating
         || previous.is_maximized != next.is_maximized
@@ -8991,7 +9020,8 @@ fn window_snapshot_requires_runtime_refresh(
     previous: &WaylandWindowSnapshot,
     next: &WaylandWindowSnapshot,
 ) -> bool {
-    previous.is_focused != next.is_focused || previous.interaction != next.interaction
+    previous.title != next.title
+        || previous.is_focused != next.is_focused || previous.interaction != next.interaction
 }
 
 fn push_damage_pair(
@@ -9257,6 +9287,35 @@ mod tests {
         BorderStyle, BoxNode, Color, DecorationNode, DecorationNodeKind, DecorationStyle, Edges,
         LayoutDirection, Overflow, StylePosition,
     };
+
+    #[test]
+    fn client_rect_probe_clears_staleness_only_when_coherent() {
+        let rect = LogicalRect::new(10, 40, 640, 480);
+        let moved = LogicalRect::new(12, 40, 640, 480);
+        assert!(client_rect_probe_agrees(true, false, 1.5, 1.5, rect, rect));
+        assert!(!client_rect_probe_agrees(true, true, 1.5, 1.5, rect, rect));
+        assert!(!client_rect_probe_agrees(true, false, 1.0, 1.5, rect, rect));
+        assert!(!client_rect_probe_agrees(true, false, 1.5, 1.5, rect, moved));
+        assert!(!client_rect_probe_agrees(false, false, 1.5, 1.5, rect, rect));
+    }
+
+    #[test]
+    fn title_changes_refresh_through_cache_and_app_ids_rebuild() {
+        let previous = WaylandWindowSnapshot {
+            id: "test-window".into(), title: "old title".into(), app_id: Some("terminal".into()),
+            position: Default::default(), rect: Default::default(), is_focused: false,
+            is_floating: true, is_maximized: false, is_fullscreen: false, is_xwayland: false,
+            decoration: Default::default(), size_constraints: Default::default(),
+            is_resizable: true, is_transient: false, parent_id: None, icon: None,
+            interaction: Default::default(),
+        };
+        let mut next = previous.clone();
+        next.title = "new title".into();
+        assert!(!window_snapshot_requires_rebuild(&previous, &next));
+        assert!(window_snapshot_requires_runtime_refresh(&previous, &next));
+        next.app_id = Some("different-app".into());
+        assert!(window_snapshot_requires_rebuild(&previous, &next));
+    }
 
     #[test]
     fn shader_clip_coverage_stays_inside_border_ring_at_fractional_scale() {

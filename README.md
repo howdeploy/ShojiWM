@@ -11,6 +11,15 @@
 <video src="https://github.com/user-attachments/assets/b93d7afa-87cd-4399-8603-d5c6a3d63ebf" width="320" height="240" controls></video>
 </div>
 
+## KISA desktop fork
+
+This fork's `main` is the compatibility branch for
+[KISA Stack dotfiles](https://github.com/howdeploy/kisa-stack/tree/main/dotfiles).
+The November 3 source update preserves mouse side-button shortcuts and includes
+the November 2 compositor fixes for decoration refresh, client-rectangle caches,
+output-scoped layer redraws, title updates and shared-memory screencopy bounds.
+See [desktop snapshot notes](DESKTOP-SNAPSHOT.md) for provenance and validation limits.
+
 ## Documents
 
 - [English](https://bea4dev.github.io/ShojiWM/)

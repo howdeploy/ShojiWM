@@ -16,7 +16,6 @@ use smithay::backend::renderer::sync::SyncPoint;
 use smithay::backend::renderer::{Bind, Color32F, ExportMem, Offscreen};
 use smithay::output::Output;
 use smithay::reexports::calloop::LoopHandle;
-use smithay::reexports::wayland_server::protocol::wl_shm;
 use smithay::utils::{Physical, Rectangle, Scale, Size, Transform};
 use smithay::wayland::shm;
 
@@ -276,24 +275,55 @@ fn render_to_shm(
     elements: &[impl RenderElement<GlesRenderer>],
 ) -> Result<(), Box<dyn std::error::Error>> {
     timescope::scope!("screencopy render_to_shm");
-    shm::with_buffer_contents_mut(buffer, |shm_buffer, shm_len, buffer_data| {
-        if !(buffer_data.format == wl_shm::Format::Xrgb8888
-            && buffer_data.width == size.w
-            && buffer_data.height == size.h
-            && buffer_data.stride == size.w * 4
-            && shm_len == buffer_data.stride as usize * buffer_data.height as usize)
-        {
+    shm::with_buffer_contents_mut(buffer, |shm_buffer, pool_len, buffer_data| {
+        let Some(range) = crate::protocols::screencopy::screencopy_shm_buffer_range(pool_len, buffer_data, size) else {
             return Err::<(), Box<dyn std::error::Error>>("invalid shm buffer format/size".into());
-        }
+        };
         let mapping =
             render_and_download(renderer, size, scale, transform, Fourcc::Xrgb8888, elements)?;
         let bytes = renderer.map_texture(&mapping)?;
         unsafe {
-            ptr::copy_nonoverlapping(bytes.as_ptr(), shm_buffer.cast(), shm_len);
+            copy_frame_to_shm(shm_buffer, pool_len, range, bytes)?;
         }
         Ok(())
     })??;
     Ok(())
+}
+
+unsafe fn copy_frame_to_shm(
+    pool: *mut u8,
+    pool_len: usize,
+    range: std::ops::Range<usize>,
+    frame: &[u8],
+) -> Result<(), Box<dyn std::error::Error>> {
+    if range.start > range.end || range.end > pool_len {
+        return Err("shm buffer lies outside its pool".into());
+    }
+    let len = range.end - range.start;
+    if frame.len() < len {
+        return Err("downloaded frame is smaller than the buffer".into());
+    }
+    unsafe { ptr::copy_nonoverlapping(frame.as_ptr(), pool.add(range.start), len); }
+    Ok(())
+}
+
+#[cfg(test)]
+mod shm_copy_tests {
+    use super::*;
+
+    #[test]
+    fn copy_preserves_shared_pool_neighbors_and_rejects_invalid_input() {
+        let mut pool = vec![0xA5; 10];
+        unsafe { copy_frame_to_shm(pool.as_mut_ptr(), pool.len(), 3..7, &[1, 2, 3, 4]).unwrap(); }
+        assert_eq!(pool, [0xA5, 0xA5, 0xA5, 1, 2, 3, 4, 0xA5, 0xA5, 0xA5]);
+        let before = pool.clone();
+        let start = 7;
+        let end = 3;
+        for range in [8..12, start..end, 3..7] {
+            assert!(unsafe { copy_frame_to_shm(pool.as_mut_ptr(), pool.len(), range, &[1, 2]) }.is_err());
+            assert_eq!(pool, before);
+        }
+    }
 }
 
 fn render_and_download(

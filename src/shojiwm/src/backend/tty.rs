@@ -2576,7 +2576,13 @@ pub fn render_if_needed(
     state.needs_redraw = false;
     let mut processed_outputs: Vec<String> = Vec::new();
 
-    queue_tty_redraws(state);
+    let requested_outputs = if std::mem::take(&mut state.redraw_all_outputs) {
+        state.pending_output_redraws.clear();
+        None
+    } else {
+        Some(std::mem::take(&mut state.pending_output_redraws))
+    };
+    queue_tty_redraws(state, requested_outputs.as_ref());
 
     let nodes: Vec<_> = state.tty_backends.keys().copied().collect();
     for node in nodes {
@@ -3181,7 +3187,7 @@ fn capture_scene_texture_for_effect(
     .map(|snapshot| snapshot.texture)
 }
 
-fn queue_tty_redraws(state: &mut ShojiWM) {
+fn queue_tty_redraws(state: &mut ShojiWM, requested: Option<&std::collections::HashSet<String>>) {
     let gap_threshold_ms = animation_gap_threshold_ms();
     let renderable_outputs = state
         .space
@@ -3197,6 +3203,9 @@ fn queue_tty_redraws(state: &mut ShojiWM) {
                     surface.queued_at = None;
                     surface.next_frame_target = None;
                 }
+                continue;
+            }
+            if requested.is_some_and(|outputs| !outputs.contains(&surface.output.name())) {
                 continue;
             }
             let previous_state = surface.redraw_state;
